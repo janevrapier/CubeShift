@@ -138,18 +138,41 @@ def bin_cube(x_factor, y_factor, data_cube, margin='center', method='sum', inpla
     # groups of 'factor[0] x factor[1]' pixels.
     newdata = data_cube.data.reshape(preshape)
     for k in range(1, data_cube.ndim+1):
-        newdata = np.nansum(newdata, axis=k)
+        if method == 'sum':
+            newdata = np.nansum(newdata, axis=k)
+        elif method == 'mean':
+            newdata = np.nanmean(newdata, axis=k)
+        elif method == 'median':
+            newdata = np.nanmedian(newdata, axis=k)
     data_cube._data = newdata.data 
 
     # the treatment of the variance array is complicated by the possibility 
-    # of masked pixels in the data array. A sum of N data pixels p[i] with 
-    # variance v[i] has a variance of sum(v[i]/N^2) where N^2 is the number 
-    # of unmasked pixels in that particular sum.
+    # of masked pixels in the data array. 
     if data_cube._var is not None:
         newvar = data_cube.var.reshape(preshape)
-        for k in range(1, data_cube.ndim+1):
-            newvar = newvar.sum(k)
-        newvar /= unmasked**2
+        # When calculating the sum: 
+        # A sum of N data pixels p[i] with variance v[i] has a variance of 
+        # sum(v[i]) 
+        if method == 'sum':
+            for k in range(1, data_cube.ndim+1):
+                newvar = newvar.sum(k)
+        # When calculating the mean: 
+        # A sum of N data pixels p[i] with variance v[i] has a variance of 
+        # sum(v[i]/N^2) 
+        # where N^2 is the number of unmasked pixels in that particular sum.
+        elif method == 'mean':
+            for k in range(1, data_cube.ndim+1):
+                newvar = newvar.sum(k)
+            newvar /= unmasked**2
+        # When calculating the median: 
+        # A sum of N data pixels p[i] has an estimated variance of 
+        # (1.253 * stdev(p[i]))^2 / N 
+        # where N is the number of unmasked pixels in that particular sum.
+        elif method == 'median':
+            for k in range(1, data_cube.ndim+1):
+                newvar = (1.253 * np.nanstd(newdata, axis=k))**2
+            newvar /= unmasked
+        # add whichever one it was to the data_cube
         data_cube._var = newvar.data
 
     # Any pixels in the output array that come from zero unmasked pixels of the 
