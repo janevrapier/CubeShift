@@ -135,6 +135,27 @@ def _shorten_data_axis_dimensions(data_cube, slices):
 
     return data_cube
         
+def _determine_new_data_shape(data_cube, factor):
+    """Determines the new data shape after binning.  With the cropped data, the 
+    dimensions should be integer multiples of the reduction factors.  This
+    function returns the shape of the output image.
+
+    Parameters
+    ----------
+    data_cube : `mpdaf.obj.Cube`
+        An mpdaf object of the data cube
+    factor : `~numpy.ndarray`
+        An array of the reduction factor for each axis
+
+    Returns
+    -------
+    `~numpy.ndarray`
+        The new shape of the data after binning
+    """
+
+    newshape = data_cube.shape // factor 
+
+    return newshape 
 
 
 def bin_cube(x_factor, y_factor, data_cube, margin='center', method='sum', inplace=False):
@@ -232,7 +253,7 @@ def bin_cube(x_factor, y_factor, data_cube, margin='center', method='sum', inpla
 
     # Now the dimensions should be integer multiples of the reduction factors.
     # Need to figure out the shape of the output image 
-    newshape = data_cube.shape // factor 
+    newshape = _determine_new_data_shape(data_cube, factor) 
 
     # create a list of array dimensions that are made up of each of the final 
     # dimensions of the array, followed by the corresponding axis reduction
