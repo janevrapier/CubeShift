@@ -32,7 +32,27 @@ def _reduction_factor_to_array(x_factor, y_factor, data_cube):
 
     return factor 
 
-def _
+def _compute_num_of_extra_pixels(factor, data_cube):
+    """Computes the number of pixels by which each axis dimension is more than
+    an integer multiple of the reduction factor.
+
+    Parameters
+    ----------
+    factor : `~numpy.ndarray`
+        The array containing the reduction factor for each axis
+    data_cube : `mpdaf.obj.Cube`
+        mpdaf Cube object of the data
+
+    Returns
+    -------
+    `~numpy.ndarray`
+        The integer number of pixels extra in each axis dimension
+    """
+    n = np.mod(data_cube.shape, factor).astype(int)
+
+    return n
+
+
 
 
 def bin_cube(x_factor, y_factor, data_cube, margin='center', method='sum', inplace=False):
@@ -111,9 +131,9 @@ def bin_cube(x_factor, y_factor, data_cube, margin='center', method='sum', inpla
     if np.any(factor < 1) or np.any(factor>=data_cube.shape):
         raise ValueError('The reduction factors must be from 1 to shape')
 
-    #compute the number of pixels by which each axis dimension is more than
-    #an integer multiple of the reduction factor
-    n = np.mod(data_cube.shape, factor).astype(int)
+    # compute the number of pixels by which each axis dimension is more than
+    # an integer multiple of the reduction factor
+    n = _compute_num_of_extra_pixels(factor, data_cube)
 
     #if necessary, compute the slices needed to shorten the dimensions to be 
     #integer multiples of the axis reduction
