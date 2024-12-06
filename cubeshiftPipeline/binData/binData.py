@@ -48,11 +48,93 @@ def _compute_num_of_extra_pixels(factor, data_cube):
     `~numpy.ndarray`
         The integer number of pixels extra in each axis dimension
     """
-    n = np.mod(data_cube.shape, factor).astype(int)
+    num_extra_pixels = np.mod(data_cube.shape, factor).astype(int)
 
-    return n
+    return num_extra_pixels
 
+def _compute_shortened_axis_dimensions(data_cube, num_extra_pixels, margin='center'):
+    """Computes the slices that will be taken out to shorten the dimensions of 
+    the data cube to be an integer multiple of the axis reduction factor.
 
+    Parameters
+    ----------
+    data_cube : `mpdaf.obj.Cube`
+        mpdaf Cube object of the data 
+    num_extra_pixels : `~numpy.ndarray`
+        An array containing the number of extra pixels in each axis
+    margin : str, optional
+        When the dimensions of the input array are not integer multiples of the 
+        reduction factor, the array is truncated to remove just enough pixels
+        that its dimensions are multiples of the reduction factor.  This subarray 
+        is then rebinned in place of the original array.  The margin parameter 
+        determines which pixels of the input array are truncated, and which remain.
+        By default 'center'.
+
+        The options are:
+            'origin' or 'left':
+                The starts of the axes of the output array are coincident with 
+                the starts of the axes of the input array.
+            'center':
+                The centre of the output array is aligned with the centre of the 
+                input array, within one pixel along each axis.
+            'right':
+                The ends of the axes of the output array are coincident with the 
+                ends of the axes of the input array.
+
+    Returns
+    -------
+    tuple
+        The slices to apply to the data to make it the right dimensions for
+        binning
+    """
+
+    # Add a slice for each axis to a list of slices
+    slices = []
+
+    # Iterate through the cube dimensions
+    for k in range(data_cube.ndim):
+        # Compute the slice of axis k needed to truncate this axis
+        if margin == 'origin' or margin == 'left':
+            nstart = 0
+        elif margin == 'center':
+            nstart = num_extra_pixels[k] // 2
+        elif margin == 'right':
+            nstart = num_extra_pixels[k]
+        slices.append(slice(nstart, data_cube.shape[k] - num_extra_pixels[k] + nstart))
+
+    slices = tuple(slices)
+
+    return slices 
+
+def _shorten_data_axis_dimensions(data_cube, slices):
+    """Applies the slices to the data_cube, shortening the dimensions so that it 
+    has an integer multiple of the reduction factor along each axis.
+
+    Parameters
+    ----------
+    data_cube : `mpdaf.obj.Cube`
+        An mpdaf Cube of the data 
+    slices : tuple
+        The slices to be applied to the data to shorten it
+
+    Returns
+    -------
+    `mpdaf.obj.Cube`
+        The data cube with the shortened dimensions.
+    """
+
+    # Create a sliced copy of the input data cube 
+    tmp = data_cube[slices]
+
+    # Copy the sliced data back into the data_cube, so that inplace=True works
+    data_cube._data = tmp._data
+    data_cube._var = tmp._var
+    data_cube._mask = tmp._mask
+    data_cube.wcs = tmp.wcs
+    data_cube.wave = tmp.wave
+
+    return data_cube
+        
 
 
 def bin_cube(x_factor, y_factor, data_cube, margin='center', method='sum', inplace=False):
@@ -133,35 +215,20 @@ def bin_cube(x_factor, y_factor, data_cube, margin='center', method='sum', inpla
 
     # compute the number of pixels by which each axis dimension is more than
     # an integer multiple of the reduction factor
-    n = _compute_num_of_extra_pixels(factor, data_cube)
+    num_extra_pixels = _compute_num_of_extra_pixels(factor, data_cube)
 
-    #if necessary, compute the slices needed to shorten the dimensions to be 
-    #integer multiples of the axis reduction
-    if np.any(n != 0):
+    # if necessary, compute the slices needed to shorten the dimensions to be 
+    # integer multiples of the axis reduction
+    if np.any(num_extra_pixels != 0):
 
-        # Add a slice for each axis to a list of slices.
-        slices = []
-        for k in range(data_cube.ndim):
-            # Compute the slice of axis k needed to truncate this axis.
-            if margin == 'origin' or margin == 'left':
-                nstart = 0
-            elif margin == 'center':
-                nstart = n[k] // 2
-            elif margin == 'right':
-                nstart = n[k]
-            slices.append(slice(nstart, data_cube.shape[k] - n[k] + nstart))
-
-        slices = tuple(slices)
-
-        # Get a sliced copy of the input object.
-        tmp = data_cube[slices]
-
-        # Copy the sliced data back into data_cube, so that inplace=True works.
-        data_cube._data = tmp._data
-        data_cube._var = tmp._var
-        data_cube._mask = tmp._mask
-        data_cube.wcs = tmp.wcs
-        data_cube.wave = tmp.wave
+        slices = _compute_shortened_axis_dimensions(data_cube, 
+                                                    num_extra_pixels,
+                                                    margin=margin
+                                                    )
+        
+        data_cube = _shorten_data_axis_dimensions(data_cube,
+                                                  slices
+                                                  )
 
     # Now the dimensions should be integer multiples of the reduction factors.
     # Need to figure out the shape of the output image 
