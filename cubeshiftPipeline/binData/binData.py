@@ -2,6 +2,37 @@ import numpy as np
 
 
 
+def _reduction_factor_to_array(x_factor, y_factor, data_cube):
+    """Turns the reduction factors (x and y) into an array.  We keep the 
+    z-direction as 1 since we don't want to bin in the wavelength direction.
+
+    Parameters
+    ----------
+    x_factor : int
+        The integer reduction factor along the image x axis
+    y_factor : int
+        The integer reduction factor along the image y axis
+    data_cube : `mpdaf.obj.Cube`
+        mpdaf cube object of the data
+
+    Returns
+    -------
+    factor
+        An array of the reduction factors dependent on the shape of the data array
+    """
+    
+    # putting the first reduction factor as 1 since we don't want to bin 
+    # in the wavelength direction
+    if len(data_cube.shape)==3:
+        factor = np.asarray([1, y_factor, x_factor])
+    elif len(data_cube.shape)==2:
+        factor = np.asarray([y_factor, x_factor])
+    elif len(data_cube.shape)==1:
+        factor = np.asarray([x_factor])
+
+    return factor 
+
+
 def bin_cube(x_factor, y_factor, data_cube, margin='center', method='sum', inplace=False):
     """Combine the neighbouring pixels to reduce the spatial size of the array 
     by integer factors along the x and y axes.  Each output pixel is the sum of 
@@ -71,17 +102,9 @@ def bin_cube(x_factor, y_factor, data_cube, margin='center', method='sum', inpla
     if margin not in ('center', 'origin', 'left', 'right'):
         raise ValueError('Unsupported margin parameter: %s' % margin)
 
-    #turn the reduction factors into an array
-    #putting the first reduction factor as 1 since we don't want to bin 
-    #in the wavelength direction
-    if len(data_cube.shape)==3:
-        factor = np.asarray([1, y_factor, x_factor])
-    elif len(data_cube.shape)==2:
-        factor = np.asarray([y_factor, x_factor])
-    elif len(data_cube.shape)==1:
-        factor = np.asarray([x_factor])
+    # turn the reduction factors into an array
+    factor = _reduction_factor_to_array(x_factor, y_factor, data_cube)
     
-
     #check that the reduction factors are in the range 1 to shape-1
     if np.any(factor < 1) or np.any(factor>=data_cube.shape):
         raise ValueError('The reduction factors must be from 1 to shape')
