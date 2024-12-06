@@ -17,7 +17,7 @@ def _reduction_factor_to_array(x_factor, y_factor, data_cube):
 
     Returns
     -------
-    factor
+    `~numpy.ndarray`
         An array of the reduction factors dependent on the shape of the data array
     """
     
@@ -31,6 +31,8 @@ def _reduction_factor_to_array(x_factor, y_factor, data_cube):
         factor = np.asarray([x_factor])
 
     return factor 
+
+def _
 
 
 def bin_cube(x_factor, y_factor, data_cube, margin='center', method='sum', inplace=False):
@@ -105,7 +107,7 @@ def bin_cube(x_factor, y_factor, data_cube, margin='center', method='sum', inpla
     # turn the reduction factors into an array
     factor = _reduction_factor_to_array(x_factor, y_factor, data_cube)
     
-    #check that the reduction factors are in the range 1 to shape-1
+    # check that the reduction factors are in the range 1 to shape-1
     if np.any(factor < 1) or np.any(factor>=data_cube.shape):
         raise ValueError('The reduction factors must be from 1 to shape')
 
