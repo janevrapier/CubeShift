@@ -381,6 +381,24 @@ def _mask_output_array(data_cube, unmasked):
 
     return data_cube
 
+def _update_wcs(data_cube):
+    """Updates the WCS using the mpdaf wcs rebin function.
+
+    Parameters
+    ----------
+    data_cube : `mpdaf.obj.Cube`
+        The data cube as an mpdaf object
+
+    Returns
+    -------
+    `mpdaf.obj.Cube`
+        The data cube with the WCS updated to match the size of the binned data.
+    """
+    if data_cube._has_wcs and data_cube.wcs is not None and data_cube.ndim > 1:
+        data_cube.wcs = data_cube.wcs.rebin([factor[-2], factor[-1]])
+
+    return data_cube
+
 def bin_data(x_factor, y_factor, data_cube, margin='center', method='sum', inplace=False):
     """Combine the neighbouring pixels to reduce the spatial size of the array 
     by integer factors along the x and y axes.  Each output pixel is the sum of 
@@ -501,8 +519,7 @@ def bin_data(x_factor, y_factor, data_cube, margin='center', method='sum', inpla
     data_cube = _mask_output_array(data_cube, unmasked)
 
     # update spatial world coordinates
-    if data_cube._has_wcs and data_cube.wcs is not None and data_cube.ndim > 1:
-        data_cube.wcs = data_cube.wcs.rebin([factor[-2], factor[-1]])
+    data_cube = _update_wcs(data_cube)
     
 
     return data_cube
