@@ -361,6 +361,25 @@ def _bin_var(data_cube, preshape, unmasked, method='sum'):
 
     return data_cube
 
+def _mask_output_array(data_cube, unmasked):
+    """Masks any pixels in the binned cube that were created by areas with no 
+    unmasked pixels of their own.
+
+    Parameters
+    ----------
+    data_cube : `mpdaf.obj.Cube`
+        The binned data cube
+    unmasked : `~numpy.ndarray`
+        The number of unmasked pixels in each bin.
+
+    Returns
+    -------
+    `mpdaf.obj.Cube`
+        The masked data cube
+    """
+    data_cube._mask = unmasked < 1
+
+    return data_cube
 
 def bin_data(x_factor, y_factor, data_cube, margin='center', method='sum', inplace=False):
     """Combine the neighbouring pixels to reduce the spatial size of the array 
@@ -479,7 +498,7 @@ def bin_data(x_factor, y_factor, data_cube, margin='center', method='sum', inpla
 
     # Any pixels in the output array that come from zero unmasked pixels of the 
     # input array should be masked
-    data_cube._mask = unmasked < 1
+    data_cube = _mask_output_array(data_cube, unmasked)
 
     # update spatial world coordinates
     if data_cube._has_wcs and data_cube.wcs is not None and data_cube.ndim > 1:
