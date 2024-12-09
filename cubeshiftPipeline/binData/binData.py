@@ -243,6 +243,125 @@ def _bin_data(data_cube, preshape, method='sum'):
 
     return data_cube
 
+def _calc_var_sum(data_cube, newvar):
+    """Calculates the variance when the data is summed.  A sum of N data pixels
+    p[i] with variance v[i] has a variance of sum(v[i])
+
+    Parameters
+    ----------
+    data_cube : `mpdaf.obj.Cube`
+        The original data cube
+    newvar : `~numpy.ndarray`
+        The variance reshaped using preshape
+    
+    Returns
+    -------
+    `~numpy.ndarray`
+        The calculated variance array
+    """
+    for k in range(1, data_cube.ndim+1):
+        newvar = newvar.sum(k)
+
+    return newvar 
+
+def _calc_var_mean(data_cube, newvar, unmasked):
+    """Calculates the variance when the mean is taken of the data.  For N data
+    pixels p[i] with variance v[i], the final variance will be sum(v[i]/N^2)
+    where N^2 is the number of unmasked pixels in that particular sum
+
+    Parameters
+    ----------
+    data_cube : `mpdaf.obj.Cube`
+        An mpdaf Cube object of the data cube 
+    newvar : `~numpy.ndarray`
+        The variance reshaped using preshape
+    unmasked : `~numpy.ndarray`
+        The number of unmasked pixels in each axis
+
+    Returns
+    -------
+    `~numpy.ndarray`
+        The calculated variance array
+    """
+    for k in range(1, data_cube.ndim+1):
+        newvar = newvar.sum(k)
+    newvar /= unmasked**2
+
+    return newvar 
+    
+def _calc_var_median(data_cube, newvar, unmasked):
+    """Calculates the variance when the median is taken of the data.  The method
+    adopted here for N data pixels p[i], is that the variance will have an 
+    estimated value of (1.253 * stdev(p[i]))^2 / N 
+    where N is the number of unmasked pixels in that particular sum.
+
+    Parameters
+    ----------
+    data_cube : `mpdaf.obj.Cube`
+        An mpdaf Cube object of the data cube
+    newvar : `~numpy.ndarray`
+        The variance reshaped using preshape
+    unmasked : `~numpy.ndarray`
+        The number of unmasked pixels in each axis
+
+    Returns
+    -------
+    `~numpy.ndarray`
+        The calculated variance array
+    """
+    for k in range(1, data_cube.ndim+1):
+        newvar = (1.253 * np.nanstd(newdata, axis=k))**2
+    newvar /= unmasked
+
+    return newvar 
+
+def _bin_var(data_cube, preshape, unmasked, method='sum'):
+    """Calculates the variance depending on which method was used to bin the 
+    data.  The treatment of the variance array is complicated by the possibility 
+    of masked pixels in the data array. So keeping track of this is included here.
+
+    Parameters
+    ----------
+    data_cube : `mpdaf.obj.Cube`
+        the data cube
+    preshape : `~numpy.ndarray`
+        A preshape to apply to the data so that all pixels that are to be binned
+        aer put on their own axis.
+    unmasked : `~numpy.ndarray`
+        The number of unmasked pixels in each axis.
+    method : str, optional
+        The method used to combine pixels when binning.  By default 'sum'.
+        
+        The options are:
+            'sum':
+                Takes the sum of the included pixels
+            'median':
+                Takes the median of the included pixels
+            'mean':
+                Takes the mean of the included pixels
+
+    Returns
+    -------
+    `mpdaf.obj.Cube`
+        The data cube, with the calculated variance
+    """
+    # reshape the variance so that each group of pixels to be binned together 
+    # are on their own axis
+    newvar = data_cube.var.reshape(preshape)
+
+    # calculate the variance depending on the method for binning  
+    if method == 'sum':
+        newvar = _calc_var_sum(data_cube, newvar)
+    elif method == 'mean':
+        newvar = _calc_var_mean(data_cube, newvar, unmasked)
+    elif method == 'median':
+        newvar = _calc_var_median(data_cube, newvar, unmasked)
+    # add whichever one it was to the data_cube
+    data_cube._var = newvar.data
+
+    return data_cube
+
+
 def bin_data(x_factor, y_factor, data_cube, margin='center', method='sum', inplace=False):
     """Combine the neighbouring pixels to reduce the spatial size of the array 
     by integer factors along the x and y axes.  Each output pixel is the sum of 
@@ -356,31 +475,7 @@ def bin_data(x_factor, y_factor, data_cube, margin='center', method='sum', inpla
     # the treatment of the variance array is complicated by the possibility 
     # of masked pixels in the data array. 
     if data_cube._var is not None:
-        newvar = data_cube.var.reshape(preshape)
-        # When calculating the sum: 
-        # A sum of N data pixels p[i] with variance v[i] has a variance of 
-        # sum(v[i]) 
-        if method == 'sum':
-            for k in range(1, data_cube.ndim+1):
-                newvar = newvar.sum(k)
-        # When calculating the mean: 
-        # A sum of N data pixels p[i] with variance v[i] has a variance of 
-        # sum(v[i]/N^2) 
-        # where N^2 is the number of unmasked pixels in that particular sum.
-        elif method == 'mean':
-            for k in range(1, data_cube.ndim+1):
-                newvar = newvar.sum(k)
-            newvar /= unmasked**2
-        # When calculating the median: 
-        # A sum of N data pixels p[i] has an estimated variance of 
-        # (1.253 * stdev(p[i]))^2 / N 
-        # where N is the number of unmasked pixels in that particular sum.
-        elif method == 'median':
-            for k in range(1, data_cube.ndim+1):
-                newvar = (1.253 * np.nanstd(newdata, axis=k))**2
-            newvar /= unmasked
-        # add whichever one it was to the data_cube
-        data_cube._var = newvar.data
+        data_cube = _bin_var(data_cube, preshape, unmasked, method=method)
 
     # Any pixels in the output array that come from zero unmasked pixels of the 
     # input array should be masked
