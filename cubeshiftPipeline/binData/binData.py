@@ -203,7 +203,47 @@ def _count_unmasked_pixels(data_cube, preshape):
 
     return unmasked
 
-def bin_cube(x_factor, y_factor, data_cube, margin='center', method='sum', inplace=False):
+def _bin_data(data_cube, preshape, method='sum'):
+    """The actual binning occurs here.  Reduces the size of the data array by 
+    taking the sum, mean or median of successive groups of 'factor[0] x factor[1]'
+    pixels.
+
+    Parameters
+    ----------
+    data_cube : `mpdaf.obj.Cube`
+        The data cube as an mpdaf Cube object
+    preshape : `~numpy.ndarray`
+        A preshape to apply to the data so that all pixels that are to be binned
+        are put on their own axis.
+    method : str, optional
+        The method used to combine pixels when binning.  By default 'sum'.
+        
+        The options are:
+            'sum':
+                Takes the sum of the included pixels
+            'median':
+                Takes the median of the included pixels
+            'mean':
+                Takes the mean of the included pixels
+
+    Returns
+    -------
+    `mpdaf.obj.Cube`
+        The binned data cube
+    """
+    newdata = data_cube.data.reshape(preshape)
+    for k in range(1, data_cube.ndim+1):
+        if method == 'sum':
+            newdata = np.nansum(newdata, axis=k)
+        elif method == 'mean':
+            newdata = np.nanmean(newdata, axis=k)
+        elif method == 'median':
+            newdata = np.nanmedian(newdata, axis=k)
+    data_cube._data = newdata.data 
+
+    return data_cube
+
+def bin_data(x_factor, y_factor, data_cube, margin='center', method='sum', inplace=False):
     """Combine the neighbouring pixels to reduce the spatial size of the array 
     by integer factors along the x and y axes.  Each output pixel is the sum of 
     n pixels, where n is the product of the reduction factors x_factor and 
@@ -286,7 +326,6 @@ def bin_cube(x_factor, y_factor, data_cube, margin='center', method='sum', inpla
     # if necessary, compute the slices needed to shorten the dimensions to be 
     # integer multiples of the axis reduction
     if np.any(num_extra_pixels != 0):
-
         slices = _compute_shortened_axis_dimensions(data_cube, 
                                                     num_extra_pixels,
                                                     margin=margin
@@ -312,15 +351,7 @@ def bin_cube(x_factor, y_factor, data_cube, margin='center', method='sum', inpla
 
     # reduce the size of the data array by taking the sum of the successive 
     # groups of 'factor[0] x factor[1]' pixels.
-    newdata = data_cube.data.reshape(preshape)
-    for k in range(1, data_cube.ndim+1):
-        if method == 'sum':
-            newdata = np.nansum(newdata, axis=k)
-        elif method == 'mean':
-            newdata = np.nanmean(newdata, axis=k)
-        elif method == 'median':
-            newdata = np.nanmedian(newdata, axis=k)
-    data_cube._data = newdata.data 
+    data_cube = _bin_data(data_cube, preshape, method=method)
 
     # the treatment of the variance array is complicated by the possibility 
     # of masked pixels in the data array. 
