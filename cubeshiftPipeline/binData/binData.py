@@ -180,6 +180,29 @@ def _create_preshaping_array(newshape, factor):
 
     return preshape
 
+def _count_unmasked_pixels(data_cube, preshape):
+    """Counts the number of unmasked pixels in the data cube that will contribute
+    to each summed pixel in the final data cube.
+
+    Parameters
+    ----------
+    data_cube : `mpdaf.obj.Cube`
+        The mpdaf Cube object of the data 
+    preshape : `~numpy.ndarray`
+        The preshape to apply to the data to put all pixels from each axis that 
+        are to be summed on their own axis.
+
+    Returns
+    -------
+    `~numpy.ndarray`
+        The number of unmasked pixels in each axis.    
+    """
+    unmasked = data_cube.data.reshape(preshape).count(1)
+    for k in range(2, data_cube.ndim+1):
+        unmasked = unmasked.sum(k)
+
+    return unmasked
+
 def bin_cube(x_factor, y_factor, data_cube, margin='center', method='sum', inplace=False):
     """Combine the neighbouring pixels to reduce the spatial size of the array 
     by integer factors along the x and y axes.  Each output pixel is the sum of 
@@ -285,9 +308,7 @@ def bin_cube(x_factor, y_factor, data_cube, margin='center', method='sum', inpla
 
     # compute the number of unmasked pixels of the data cube that will contribute
     # to each summed pixel in the output array 
-    unmasked = data_cube.data.reshape(preshape).count(1)
-    for k in range(2, data_cube.ndim+1):
-        unmasked = unmasked.sum(k)
+    unmasked = _count_unmasked_pixels(data_cube, preshape)
 
     # reduce the size of the data array by taking the sum of the successive 
     # groups of 'factor[0] x factor[1]' pixels.
