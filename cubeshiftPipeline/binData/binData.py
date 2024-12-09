@@ -152,11 +152,33 @@ def _determine_new_data_shape(data_cube, factor):
     `~numpy.ndarray`
         The new shape of the data after binning
     """
-
     newshape = data_cube.shape // factor 
 
     return newshape 
 
+def _create_preshaping_array(newshape, factor):
+    """Takes the newshape the data will have after binning, and the reduction
+    factors, and creates a list of array dimensions made up of each of the final
+    dimensions of the array, followed by the corresponding axis reduction factor.
+    Reshaping the data with these dimensions places all of the pixels from each 
+    axis that are to be summed on their own axis.
+
+    Parameters
+    ----------
+    newshape : `~numpy.ndarray`
+        The new shape the data will have after binning
+    factor : `~numpy.ndarray`
+        An array of the reduction factor for each axis
+
+    Returns
+    -------
+    `~numpy.ndarray`
+        A preshape to apply to the data to put all pixels from each axis that
+        are to be summed on their own axis.
+    """
+    preshape = np.column_stack((newshape, factor)).ravel()
+
+    return preshape
 
 def bin_cube(x_factor, y_factor, data_cube, margin='center', method='sum', inplace=False):
     """Combine the neighbouring pixels to reduce the spatial size of the array 
@@ -259,7 +281,7 @@ def bin_cube(x_factor, y_factor, data_cube, margin='center', method='sum', inpla
     # dimensions of the array, followed by the corresponding axis reduction
     # factor.  Reshaping with these dimensions places all of the pixels from 
     # each axis that are to be summed on their own axis.
-    preshape = np.column_stack((newshape, factor)).ravel()
+    preshape = _create_preshaping_array(newshape, factor)
 
     # compute the number of unmasked pixels of the data cube that will contribute
     # to each summed pixel in the output array 
