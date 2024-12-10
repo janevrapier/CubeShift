@@ -549,7 +549,7 @@ def remove_var(data_cube):
     return data_cube_novar
 
 
-def bin_cubes_and_remove_var(x_factor_list, y_factor_list, cube_list, redshift=None, **kwargs):
+def bin_list_of_cubes(x_factor_list, y_factor_list, cube_list, redshift=None, remove_var=True, **kwargs):
     """Takes the input cube list and bins the data x_factor x y_factor according 
     to the input lists.  Will save the output and name the results using either 
     the parsecs of the binned spaxels or the x by y factors depending on if the 
@@ -570,6 +570,9 @@ def bin_cubes_and_remove_var(x_factor_list, y_factor_list, cube_list, redshift=N
         the new physical size of the binned spaxels, which is used in the saved 
         file name.  If None, the filename uses the x_factor by y_factor instead.
         By default None.
+    remove_var : bool
+        whether to save a copy of the binned cube without the variance array.
+        Default is True.
     """
 
     # check that x_factor_list and y_factor_list are the same length 
@@ -589,7 +592,7 @@ def bin_cubes_and_remove_var(x_factor_list, y_factor_list, cube_list, redshift=N
 
         # bin the cube - iterate through the x/y_factor lists 
         for j in range(len(x_factor_list)):
-            binned_cube = bin_cube(x_factor_list[j], y_factor_list[j], this_cube, **kwargs)
+            binned_cube = bin_data(x_factor_list[j], y_factor_list[j], this_cube, **kwargs)
 
             # calculate the new bin size in pc (if the redshift was given)
             if redshift:
@@ -602,9 +605,10 @@ def bin_cubes_and_remove_var(x_factor_list, y_factor_list, cube_list, redshift=N
             # save the cube
             binned_cube.write(new_filename, savemask=False)
 
-            # remove the variance 
-            binned_cube_novar = remove_var(binned_cube)
+            # remove the variance
+            if remove_var == True:
+                binned_cube_novar = remove_var(binned_cube)
 
-            # save the cube
-            new_filename = new_filename.split('.fits')[0] + "_novar.fits"
-            binned_cube_novar.write(new_filename, savemask=False)
+                # save the cube
+                new_filename = new_filename.split('.fits')[0] + "_novar.fits"
+                binned_cube_novar.write(new_filename, savemask=False)
