@@ -1,5 +1,8 @@
 import numpy as np 
 
+from astropy import units as u
+from astropy.cosmology import WMAP9 as cosmo
+
 
 
 def _reduction_factor_to_array(x_factor, y_factor, data_cube):
@@ -381,7 +384,7 @@ def _mask_output_array(data_cube, unmasked):
 
     return data_cube
 
-def _update_wcs(data_cube):
+def _update_wcs(data_cube, factor):
     """Updates the WCS using the mpdaf wcs rebin function.
 
     Parameters
@@ -519,7 +522,7 @@ def bin_data(x_factor, y_factor, data_cube, margin='center', method='sum', inpla
     data_cube = _mask_output_array(data_cube, unmasked)
 
     # update spatial world coordinates
-    data_cube = _update_wcs(data_cube)
+    data_cube = _update_wcs(data_cube, factor)
     
 
     return data_cube
@@ -547,6 +550,45 @@ def remove_var(data_cube):
     data_cube_novar.data = data_cube.data 
 
     return data_cube_novar
+
+def calc_proper_dist(z):
+    """Calculates the proper distance to a galaxy given a redshift.  
+
+    Parameters
+    ----------
+    z : float
+        redshift
+
+    Returns
+    -------
+    `astropy.units.Quantity`
+        the proper distance
+    """
+    proper_dist = cosmo.kpc_proper_per_arcmin(z).to(u.kpc/u.arcsec)
+
+    return proper_dist 
+
+def arcsec_to_physical(arcsec, proper_dist):
+    """Turns angular arcseconds on the sky into physical distances.
+
+    Parameters
+    ----------
+    arcsec : float, np.array
+        an angular distance in arcseconds to be turned into physical distance. 
+        Can be a float or an array
+    proper_dist : `astropy.units.Quantity`
+        the proper distance
+
+    Returns
+    -------
+    `astropy.units.Quantity`
+        the physical distance on the sky
+    """
+    phys_dist = arcsec * u.arcsec * proper_dist
+
+    print('Physical distance for ', arcsec, 'arcseconds is:', phys_dist)
+
+    return phys_dist
 
 
 def bin_list_of_cubes(x_factor_list, y_factor_list, cube_list, redshift=None, remove_var=True, **kwargs):
