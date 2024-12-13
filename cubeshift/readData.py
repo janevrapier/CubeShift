@@ -6,9 +6,35 @@ from mpdaf.obj import Cube, Image
 
 class MyData:
     def __init__(self, filename):
-        # make sure it's a string, not a list
+        # make sure it's a string, not a list, or some other type 
         if type(filename) is not str:
             raise TypeError('filename must be str, not %s' % type(filename))
+        
+        # check the number of axes in the fits file
+        ndim = _check_num_axes(filename)
+
+    
+    def _check_num_axes(filename):
+        """Checks the number of axes in the fits file.
+
+        Parameters
+        ----------
+        filename : str
+            The fits file location
+
+        Returns
+        -------
+        int
+            the number of axes in the data.
+        """
+        with fits.open(filename) as hdul:
+            try:
+                ndim = hdul[0].header['NAXIS']
+            except KeyError:
+                ndim = hdul[1].header['NAXIS']
+        hdul.close()
+
+        return ndim
 
 
 
