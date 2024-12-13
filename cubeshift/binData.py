@@ -5,7 +5,7 @@ from astropy.cosmology import WMAP9 as cosmo
 
 
 
-def _reduction_factor_to_array(x_factor, y_factor, data_cube):
+def _reduction_factor_to_array(x_factor: int, y_factor: int, data_cube: mpdaf.obj) -> numpy.ndarray:
     """Turns the reduction factors (x and y) into an array.  We keep the 
     z-direction as 1 since we don't want to bin in the wavelength direction.
 
