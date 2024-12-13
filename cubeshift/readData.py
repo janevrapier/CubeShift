@@ -5,7 +5,7 @@ from mpdaf.obj import Cube, Image
 
 
 class MyData:
-    def __init__(self, filename):
+    def __init__(self, filename: str) -> None:
         # make sure it's a string, not a list, or some other type 
         if type(filename) is not str:
             raise TypeError('filename must be str, not %s' % type(filename))
@@ -22,7 +22,7 @@ class MyData:
         self.data = mydata
 
     
-    def _check_num_axes(filename):
+    def _check_num_axes(filename: str) -> int:
         """Checks the number of axes in the data in the fits file.
 
         Parameters
@@ -45,7 +45,7 @@ class MyData:
 
 
 
-def read_in_datacube(filename, ext=(1,2)):
+def read_in_datacube(filename: str, ext: tuple[int, ...] = (1,2)) -> mpdaf.obj.cube.Cube:
     """Reads in the data from a filename to an mpdaf Cube
 
     Parameters
@@ -65,7 +65,7 @@ def read_in_datacube(filename, ext=(1,2)):
 
     return datacube 
 
-def read_in_dataim(filename, ext=(1,2)):
+def read_in_dataim(filename: str, ext: tuple[int, ...] = (1,2)) -> mpdaf.obj.image.Image:
     """Reads in the data from a filename, into an mpdaf Image
 
     Parameters
