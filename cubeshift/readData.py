@@ -13,6 +13,14 @@ class MyData:
         # check the number of axes in the fits file
         ndim = _check_num_axes(filename)
 
+        # depending on the number of axes, open as a cube or an image
+        if ndim == 2:
+            mydata = read_in_dataim(filename)
+        elif ndim == 3:
+            mydata = read_in_datacube(filename)
+
+        self.data = mydata
+
     
     def _check_num_axes(filename):
         """Checks the number of axes in the data in the fits file.
