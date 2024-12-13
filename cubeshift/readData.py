@@ -1,7 +1,16 @@
 from astropy.io import fits 
 from astropy.wcs import WCS 
 
-from mpdaf import Cube, Image
+from mpdaf.obj import Cube, Image
+
+
+class MyData:
+    def __init__(self, filename):
+        # make sure it's a string, not a list
+        if type(filename) is not str:
+            raise TypeError('filename must be str, not %s' % type(filename))
+
+
 
 def read_in_datacube(filename, ext=(1,2)):
     """Reads in the data from a filename to an mpdaf Cube
