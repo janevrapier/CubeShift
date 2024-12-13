@@ -15,7 +15,7 @@ class MyData:
 
     
     def _check_num_axes(filename):
-        """Checks the number of axes in the fits file.
+        """Checks the number of axes in the data in the fits file.
 
         Parameters
         ----------
@@ -27,12 +27,11 @@ class MyData:
         int
             the number of axes in the data.
         """
-        with fits.open(filename) as hdul:
-            try:
-                ndim = hdul[0].header['NAXIS']
-            except KeyError:
-                ndim = hdul[1].header['NAXIS']
-        hdul.close()
+        hdr = fits.getheader(filename, ext=0)
+        ndim = hdr['NAXIS']
+        if ndim == 0:
+            hdr = fits.getheader(filename, ext=1)
+            ndim = hdr['NAXIS']
 
         return ndim
 
