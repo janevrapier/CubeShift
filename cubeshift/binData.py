@@ -1,11 +1,14 @@
-import numpy as np 
+from typing import Union
 
-from astropy import units as u
+import numpy as np 
+import numpy.typing as npt
+
+from astropy import units
 from astropy.cosmology import WMAP9 as cosmo
 
 
 
-def _reduction_factor_to_array(x_factor: int, y_factor: int, data_cube: mpdaf.obj) -> numpy.ndarray:
+def _reduction_factor_to_array(x_factor: int, y_factor: int, data_cube: mpdaf.obj) -> np.ndarray:
     """Turns the reduction factors (x and y) into an array.  We keep the 
     z-direction as 1 since we don't want to bin in the wavelength direction.
 
@@ -35,7 +38,7 @@ def _reduction_factor_to_array(x_factor: int, y_factor: int, data_cube: mpdaf.ob
 
     return factor 
 
-def _compute_num_of_extra_pixels(factor, data_cube):
+def _compute_num_of_extra_pixels(factor: np.ndarray, data_cube: mpdaf.obj) -> np.ndarray:
     """Computes the number of pixels by which each axis dimension is more than
     an integer multiple of the reduction factor.
 
@@ -55,7 +58,7 @@ def _compute_num_of_extra_pixels(factor, data_cube):
 
     return num_extra_pixels
 
-def _compute_shortened_axis_dimensions(data_cube, num_extra_pixels, margin='center'):
+def _compute_shortened_axis_dimensions(data_cube: mpdaf.obj, num_extra_pixels: np.ndarray, margin: str='center') -> tuple[slice, ...]:
     """Computes the slices that will be taken out to shorten the dimensions of 
     the data cube to be an integer multiple of the axis reduction factor.
 
@@ -90,7 +93,6 @@ def _compute_shortened_axis_dimensions(data_cube, num_extra_pixels, margin='cent
         The slices to apply to the data to make it the right dimensions for
         binning
     """
-
     # Add a slice for each axis to a list of slices
     slices = []
 
@@ -109,7 +111,7 @@ def _compute_shortened_axis_dimensions(data_cube, num_extra_pixels, margin='cent
 
     return slices 
 
-def _shorten_data_axis_dimensions(data_cube, slices):
+def _shorten_data_axis_dimensions(data_cube: mpdaf.obj, slices: tuple[slice, ...]) -> mpdaf.obj:
     """Applies the slices to the data_cube, shortening the dimensions so that it 
     has an integer multiple of the reduction factor along each axis.
 
@@ -138,7 +140,7 @@ def _shorten_data_axis_dimensions(data_cube, slices):
 
     return data_cube
         
-def _determine_new_data_shape(data_cube, factor):
+def _determine_new_data_shape(data_cube: mpdaf.obj, factor: np.ndarray) -> np.ndarray:
     """Determines the new data shape after binning.  With the cropped data, the 
     dimensions should be integer multiples of the reduction factors.  This
     function returns the shape of the output image.
@@ -159,7 +161,7 @@ def _determine_new_data_shape(data_cube, factor):
 
     return newshape 
 
-def _create_preshaping_array(newshape, factor):
+def _create_preshaping_array(newshape: np.ndarray, factor: np.ndarray) -> np.ndarray:
     """Takes the newshape the data will have after binning, and the reduction
     factors, and creates a list of array dimensions made up of each of the final
     dimensions of the array, followed by the corresponding axis reduction factor.
@@ -183,7 +185,7 @@ def _create_preshaping_array(newshape, factor):
 
     return preshape
 
-def _count_unmasked_pixels(data_cube, preshape):
+def _count_unmasked_pixels(data_cube: mpdaf.obj, preshape: np.ndarray) -> np.ndarray:
     """Counts the number of unmasked pixels in the data cube that will contribute
     to each summed pixel in the final data cube.
 
@@ -206,7 +208,7 @@ def _count_unmasked_pixels(data_cube, preshape):
 
     return unmasked
 
-def _bin_data(data_cube, preshape, method='sum'):
+def _bin_data(data_cube: mpdaf.obj, preshape: np.ndarray, method: str='sum') -> mpdaf.obj:
     """The actual binning occurs here.  Reduces the size of the data array by 
     taking the sum, mean or median of successive groups of 'factor[0] x factor[1]'
     pixels.
@@ -246,7 +248,7 @@ def _bin_data(data_cube, preshape, method='sum'):
 
     return data_cube
 
-def _calc_var_sum(data_cube, newvar):
+def _calc_var_sum(data_cube: mpdaf.obj, newvar: np.ndarray) -> np.ndarray:
     """Calculates the variance when the data is summed.  A sum of N data pixels
     p[i] with variance v[i] has a variance of sum(v[i])
 
@@ -267,7 +269,7 @@ def _calc_var_sum(data_cube, newvar):
 
     return newvar 
 
-def _calc_var_mean(data_cube, newvar, unmasked):
+def _calc_var_mean(data_cube: mpdaf.obj, newvar: np.ndarray, unmasked: np.ndarray) -> np.ndarray:
     """Calculates the variance when the mean is taken of the data.  For N data
     pixels p[i] with variance v[i], the final variance will be sum(v[i]/N^2)
     where N^2 is the number of unmasked pixels in that particular sum
@@ -292,7 +294,7 @@ def _calc_var_mean(data_cube, newvar, unmasked):
 
     return newvar 
     
-def _calc_var_median(data_cube, newvar, unmasked):
+def _calc_var_median(data_cube: mpdaf.obj, newvar: np.ndarray, unmasked: np.ndarray) -> np.ndarray:
     """Calculates the variance when the median is taken of the data.  The method
     adopted here for N data pixels p[i], is that the variance will have an 
     estimated value of (1.253 * stdev(p[i]))^2 / N 
@@ -318,7 +320,7 @@ def _calc_var_median(data_cube, newvar, unmasked):
 
     return newvar 
 
-def _bin_var(data_cube, preshape, unmasked, method='sum'):
+def _bin_var(data_cube: mpdaf.obj, preshape: np.ndarray, unmasked: np.ndarray, method: str='sum') -> mpdaf.obj:
     """Calculates the variance depending on which method was used to bin the 
     data.  The treatment of the variance array is complicated by the possibility 
     of masked pixels in the data array. So keeping track of this is included here.
@@ -364,7 +366,7 @@ def _bin_var(data_cube, preshape, unmasked, method='sum'):
 
     return data_cube
 
-def _mask_output_array(data_cube, unmasked):
+def _mask_output_array(data_cube: mpdaf.obj, unmasked: np.ndarray) -> mpdaf.obj:
     """Masks any pixels in the binned cube that were created by areas with no 
     unmasked pixels of their own.
 
@@ -384,7 +386,7 @@ def _mask_output_array(data_cube, unmasked):
 
     return data_cube
 
-def _update_wcs(data_cube, factor):
+def _update_wcs(data_cube: mpdaf.obj, factor: np.ndarray) -> mpdaf.obj:
     """Updates the WCS using the mpdaf wcs rebin function.
 
     Parameters
@@ -402,7 +404,7 @@ def _update_wcs(data_cube, factor):
 
     return data_cube
 
-def bin_data(x_factor, y_factor, data_cube, margin='center', method='sum', inplace=False):
+def bin_data(x_factor: int, y_factor: int, data_cube: mpdaf.obj, margin: str='center', method: str='sum', inplace: bool=False) -> mpdaf.obj:
     """Combine the neighbouring pixels to reduce the spatial size of the array 
     by integer factors along the x and y axes.  Each output pixel is the sum of 
     n pixels, where n is the product of the reduction factors x_factor and 
@@ -530,7 +532,7 @@ def bin_data(x_factor, y_factor, data_cube, margin='center', method='sum', inpla
 
 
 
-def remove_var(data_cube):
+def remove_var(data_cube: mpdaf.obj) -> mpdaf.obj:
     """Creates a cube or image without the variance extension
 
     Parameters
@@ -551,7 +553,7 @@ def remove_var(data_cube):
 
     return data_cube_novar
 
-def calc_proper_dist(z):
+def calc_proper_dist(z: float) -> units:
     """Calculates the proper distance to a galaxy given a redshift.  
 
     Parameters
@@ -564,11 +566,11 @@ def calc_proper_dist(z):
     `astropy.units.Quantity`
         the proper distance
     """
-    proper_dist = cosmo.kpc_proper_per_arcmin(z).to(u.kpc/u.arcsec)
+    proper_dist = cosmo.kpc_proper_per_arcmin(z).to(units.kpc/units.arcsec)
 
     return proper_dist 
 
-def arcsec_to_physical(arcsec, proper_dist):
+def arcsec_to_physical(arcsec: float, proper_dist: units) -> units:
     """Turns angular arcseconds on the sky into physical distances.
 
     Parameters
@@ -584,14 +586,14 @@ def arcsec_to_physical(arcsec, proper_dist):
     `astropy.units.Quantity`
         the physical distance on the sky
     """
-    phys_dist = arcsec * u.arcsec * proper_dist
+    phys_dist = arcsec * units.arcsec * proper_dist
 
     print('Physical distance for ', arcsec, 'arcseconds is:', phys_dist)
 
     return phys_dist
 
 
-def bin_list_of_cubes(x_factor_list, y_factor_list, cube_list, redshift=None, remove_var=True, **kwargs):
+def bin_list_of_cubes(x_factor_list: list[int], y_factor_list: list[int], cube_list: list[str], redshift: Union[float, list[float], None]=None, remove_var: bool=True, **kwargs):
     """Takes the input cube list and bins the data x_factor x y_factor according 
     to the input lists.  Will save the output and name the results using either 
     the parsecs of the binned spaxels or the x by y factors depending on if the 
@@ -638,7 +640,7 @@ def bin_list_of_cubes(x_factor_list, y_factor_list, cube_list, redshift=None, re
 
             # calculate the new bin size in pc (if the redshift was given)
             if redshift:
-                bin_size = (proper_dist * (binned_cube.wcs.get_axis_increments(u.arcsec)[0]*u.arcsec)).to('pc')
+                bin_size = (proper_dist * (binned_cube.wcs.get_axis_increments(units.arcsec)[0]*units.arcsec)).to('pc')
 
                 new_filename = binned_cube.filename.split('.fits')[0] + "_binned_{:0>3d}pc.fits".format(int(bin_size.value))
             else:
