@@ -208,7 +208,7 @@ def _count_unmasked_pixels(data_cube: Cube|Image, preshape: np.ndarray) -> np.nd
 
     return unmasked
 
-def _bin_data(data_cube: Cube|Image, preshape: np.ndarray, method: str='sum') -> Cube|Image:
+def _bin_data(data_cube: Cube|Image, newdata: np.ndarray, method: str='sum') -> Cube|Image:
     """The actual binning occurs here.  Reduces the size of the data array by 
     taking the sum, mean or median of successive groups of 'factor[0] x factor[1]'
     pixels.
@@ -217,8 +217,8 @@ def _bin_data(data_cube: Cube|Image, preshape: np.ndarray, method: str='sum') ->
     ----------
     data_cube : `mpdaf.obj.Cube`
         The data cube as an mpdaf Cube object
-    preshape : `~numpy.ndarray`
-        A preshape to apply to the data so that all pixels that are to be binned
+    newdata : `~numpy.ndarray`
+        The data with preshape applied so that all pixels that are to be binned
         are put on their own axis.
     method : str, optional
         The method used to combine pixels when binning.  By default 'sum'.
@@ -236,7 +236,6 @@ def _bin_data(data_cube: Cube|Image, preshape: np.ndarray, method: str='sum') ->
     `mpdaf.obj.Cube`
         The binned data cube
     """
-    newdata = data_cube.data.reshape(preshape)
     for k in range(1, data_cube.ndim+1):
         if method == 'sum':
             newdata = np.nansum(newdata, axis=k)
@@ -294,7 +293,7 @@ def _calc_var_mean(data_cube: Cube|Image, newvar: np.ndarray, unmasked: np.ndarr
 
     return newvar 
     
-def _calc_var_median(data_cube: Cube|Image, newvar: np.ndarray, unmasked: np.ndarray) -> np.ndarray:
+def _calc_var_median(data_cube: Cube|Image, newdata: np.ndarray, unmasked: np.ndarray) -> np.ndarray:
     """Calculates the variance when the median is taken of the data.  The method
     adopted here for N data pixels p[i], is that the variance will have an 
     estimated value of (1.253 * stdev(p[i]))^2 / N 
@@ -304,8 +303,8 @@ def _calc_var_median(data_cube: Cube|Image, newvar: np.ndarray, unmasked: np.nda
     ----------
     data_cube : `mpdaf.obj.Cube`
         An mpdaf Cube object of the data cube
-    newvar : `~numpy.ndarray`
-        The variance reshaped using preshape
+    newdata : `~numpy.ndarray`
+        The data reshaped using preshape
     unmasked : `~numpy.ndarray`
         The number of unmasked pixels in each axis
 
@@ -320,7 +319,7 @@ def _calc_var_median(data_cube: Cube|Image, newvar: np.ndarray, unmasked: np.nda
 
     return newvar 
 
-def _bin_var(data_cube: Cube|Image, preshape: np.ndarray, unmasked: np.ndarray, method: str='sum') -> Cube|Image:
+def _bin_var(data_cube: Cube|Image, newdata: np.ndarray, preshape: np.ndarray, unmasked: np.ndarray, method: str='sum') -> Cube|Image:
     """Calculates the variance depending on which method was used to bin the 
     data.  The treatment of the variance array is complicated by the possibility 
     of masked pixels in the data array. So keeping track of this is included here.
@@ -329,6 +328,9 @@ def _bin_var(data_cube: Cube|Image, preshape: np.ndarray, unmasked: np.ndarray, 
     ----------
     data_cube : `mpdaf.obj.Cube`
         the data cube
+    newdata : `~numpy.ndarray`
+        The data with preshape applied so that all pixels that are to be binned
+        are put on their own axis.
     preshape : `~numpy.ndarray`
         A preshape to apply to the data so that all pixels that are to be binned
         aer put on their own axis.
@@ -360,7 +362,7 @@ def _bin_var(data_cube: Cube|Image, preshape: np.ndarray, unmasked: np.ndarray, 
     elif method == 'mean':
         newvar = _calc_var_mean(data_cube, newvar, unmasked)
     elif method == 'median':
-        newvar = _calc_var_median(data_cube, newvar, unmasked)
+        newvar = _calc_var_median(data_cube, newdata, unmasked)
     # add whichever one it was to the data_cube
     data_cube._var = newvar.data
 
@@ -510,14 +512,18 @@ def bin_data(x_factor: int, y_factor: int, data_cube: Cube|Image, margin: str='c
     # to each summed pixel in the output array 
     unmasked = _count_unmasked_pixels(data_cube, preshape)
 
+    # reshape the data so that each group of pixels to be binned together 
+    # are on their own axis
+    newdata = data_cube.data.reshape(preshape)
+
     # reduce the size of the data array by taking the sum of the successive 
     # groups of 'factor[0] x factor[1]' pixels.
-    data_cube = _bin_data(data_cube, preshape, method=method)
+    data_cube = _bin_data(data_cube, newdata, method=method)
 
     # the treatment of the variance array is complicated by the possibility 
     # of masked pixels in the data array. 
     if data_cube._var is not None:
-        data_cube = _bin_var(data_cube, preshape, unmasked, method=method)
+        data_cube = _bin_var(data_cube, newdata, preshape, unmasked, method=method)
 
     # Any pixels in the output array that come from zero unmasked pixels of the 
     # input array should be masked
