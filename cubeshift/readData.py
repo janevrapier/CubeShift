@@ -1,3 +1,5 @@
+from typing import Union
+
 from astropy.io import fits 
 from astropy.wcs import WCS 
 
@@ -45,7 +47,7 @@ class MyData:
 
 
 
-def read_in_datacube(filename: str, ext: tuple[int, ...] = (1,2)) -> mpdaf.obj.cube.Cube:
+def read_in_datacube(filename: str, ext: tuple[int, ...] = (1,2)) -> Cube:
     """Reads in the data from a filename to an mpdaf Cube
 
     Parameters
@@ -65,7 +67,7 @@ def read_in_datacube(filename: str, ext: tuple[int, ...] = (1,2)) -> mpdaf.obj.c
 
     return datacube 
 
-def read_in_dataim(filename: str, ext: tuple[int, ...] = (1,2)) -> mpdaf.obj.image.Image:
+def read_in_dataim(filename: str, ext: tuple[int, ...] = (1,2)) -> Image:
     """Reads in the data from a filename, into an mpdaf Image
 
     Parameters
