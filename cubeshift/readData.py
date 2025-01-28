@@ -11,7 +11,7 @@ class MyData:
             raise TypeError('filename must be str, not %s' % type(filename))
         
         # check the number of axes in the fits file
-        ndim = _check_num_axes(filename)
+        self.ndim = self._check_num_axes(filename)
 
         # depending on the number of axes, open as a cube or an image
         if self.ndim == 2:
@@ -28,7 +28,7 @@ class MyData:
 
 
     
-    def _check_num_axes(filename: str) -> int:
+    def _check_num_axes(self, filename: str) -> int:
         """Checks the number of axes in the data in the fits file.
 
         Parameters
