@@ -23,11 +23,7 @@ class MyData:
 
         self.mydata = mydata
 
-        # now depending on the value of CTYPE3, apply air to vacuum wavelengths
-        # for MUSE, CTYPE3 can be AWAV, AWAV-LOG, WAVE or WAVE-LOG
-        if self.ndim == 3:
-            if self.mydata.data_header['CTYPE3']=='AWAV':
-
+        
 
     
     def _check_num_axes(self, filename: str) -> int:
@@ -51,27 +47,7 @@ class MyData:
 
         return ndim
     
-    def air_to_vac(self, wavelength: np.ndarray) -> np.ndarray:
-        """
-        Implements the air to vacuum wavelength conversion described in eqn 64 and
-        65 of Greisen 2006. The error in the index of refraction amounts to 1:10^9,
-        which is less than the empirical formula.
-        Function slightly altered from specutils.utils.wcs_utils.
-
-        Parameters
-        ----------
-        wavelength : :obj:'~numpy.ndarray'
-            the air wavelength(s) in Angstroms
-
-        Returns
-        -------
-        wavelength : :obj:'~numpy.ndarray'
-            the vacuum wavelength(s) in Angstroms
-        """
-        #convert wavelength to um from Angstroms
-        wlum = wavelength/10000
-        #apply the equation from the paper
-        return (1+1e-6*(287.6155+1.62887/wlum**2+0.01360/wlum**4)) * wavelength
+    
 
 
 
