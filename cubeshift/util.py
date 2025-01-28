@@ -1,3 +1,5 @@
+import numpy as np
+
 def air_to_vac(self, wavelength: np.ndarray) -> np.ndarray:
         """
         Implements the air to vacuum wavelength conversion described in eqn 64 and
