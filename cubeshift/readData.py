@@ -5,7 +5,7 @@ from mpdaf.obj import Cube, Image
 
 
 class MyData:
-    def __init__(self, filename: str) -> None:
+    def __init__(self, filename: str, ext: tuple[int, ...] = (1,2)) -> Cube|Image:
         # make sure it's a string, not a list, or some other type 
         if type(filename) is not str:
             raise TypeError('filename must be str, not %s' % type(filename))
@@ -14,12 +14,18 @@ class MyData:
         ndim = _check_num_axes(filename)
 
         # depending on the number of axes, open as a cube or an image
-        if ndim == 2:
-            mydata = read_in_dataim(filename)
-        elif ndim == 3:
-            mydata = read_in_datacube(filename)
+        if self.ndim == 2:
+            mydata = read_in_dataim(filename, ext=ext)
+        elif self.ndim == 3:
+            mydata = read_in_datacube(filename, ext=ext)
 
-        self.data = mydata
+        self.mydata = mydata
+
+        # now depending on the value of CTYPE3, apply air to vacuum wavelengths
+        # for MUSE, CTYPE3 can be AWAV, AWAV-LOG, WAVE or WAVE-LOG
+        if self.ndim == 3:
+            if self.mydata.data_header['CTYPE3']=='AWAV':
+
 
     
     def _check_num_axes(filename: str) -> int:
