@@ -1,4 +1,11 @@
 import numpy as np 
+from mpdaf.obj import Cube
+from astropy.cosmology import Planck18 as cosmo
+import astropy.units as u
+
+def calc_proper_dist(z):
+    """Return angular diameter distance in parsecs at redshift z"""
+    return cosmo.angular_diameter_distance(z).to(u.pc)
 
 
 
@@ -32,7 +39,6 @@ def _reduction_factor_to_array(x_factor, y_factor, data_cube):
 
     return factor 
 
-def _
 
 
 def bin_cube(x_factor, y_factor, data_cube, margin='center', method='sum', inplace=False):
@@ -155,21 +161,40 @@ def bin_cube(x_factor, y_factor, data_cube, margin='center', method='sum', inpla
 
     # compute the number of unmasked pixels of the data cube that will contribute
     # to each summed pixel in the output array 
-    unmasked = data_cube.data.reshape(preshape).count(1)
-    for k in range(2, data_cube.ndim+1):
-        unmasked = unmasked.sum(k)
+    # Count how many unmasked pixels are in each binned region
+    unmasked_mask = ~data_cube.data.mask  # True = unmasked
+    unmasked = unmasked_mask.reshape(preshape).astype(int)
 
-    # reduce the size of the data array by taking the sum of the successive 
-    # groups of 'factor[0] x factor[1]' pixels.
+    if data_cube.ndim == 3:
+        unmasked = unmasked.sum(axis=(1, 3, 5))
+    elif data_cube.ndim == 2:
+        unmasked = unmasked.sum(axis=(1, 3))
+
+
+    # Reshape the data array to prepare for binning
     newdata = data_cube.data.reshape(preshape)
-    for k in range(1, data_cube.ndim+1):
-        if method == 'sum':
-            newdata = np.nansum(newdata, axis=k)
-        elif method == 'mean':
-            newdata = np.nanmean(newdata, axis=k)
-        elif method == 'median':
-            newdata = np.nanmedian(newdata, axis=k)
-    data_cube._data = newdata.data 
+
+    # Determine which axes to reduce (these are the axes of the binning dimensions)
+    if data_cube.ndim == 3:
+        bin_axes = (1, 3, 5)
+    elif data_cube.ndim == 2:
+        bin_axes = (1, 3)
+    else:
+        raise ValueError("Unsupported data cube dimensionality")
+
+    # Apply the chosen reduction method across the binning axes
+    if method == 'sum':
+        newdata = np.nansum(newdata, axis=bin_axes)
+    elif method == 'mean':
+        newdata = np.nanmean(newdata, axis=bin_axes)
+    elif method == 'median':
+        newdata = np.nanmedian(newdata, axis=bin_axes)
+    else:
+        raise ValueError(f"Unknown binning method: {method}")
+
+    # Store the result
+    data_cube._data = newdata
+
 
     # the treatment of the variance array is complicated by the possibility 
     # of masked pixels in the data array. 
@@ -266,6 +291,8 @@ def bin_cubes_and_remove_var(x_factor_list, y_factor_list, cube_list, redshift=N
     for i, file in enumerate(cube_list):
         # open the file as a cube
         this_cube = Cube(file)
+        this_cube.filename = file  # manually attach filename
+
 
         # if redshift given calculate the proper distance
         if redshift:
@@ -280,7 +307,8 @@ def bin_cubes_and_remove_var(x_factor_list, y_factor_list, cube_list, redshift=N
 
             # calculate the new bin size in pc (if the redshift was given)
             if redshift:
-                bin_size = (proper_dist * (binned_cube.wcs.get_axis_increments(u.arcsec)[0]*u.arcsec)).to('pc')
+                pixel_scale_rad = binned_cube.wcs.get_axis_increments(u.arcsec)[0] * u.arcsec
+                bin_size = proper_dist * pixel_scale_rad.to(u.radian)
 
                 new_filename = binned_cube.filename.split('.fits')[0] + "_binned_{:0>3d}pc.fits".format(int(bin_size.value))
             else:
@@ -295,3 +323,16 @@ def bin_cubes_and_remove_var(x_factor_list, y_factor_list, cube_list, redshift=N
             # save the cube
             new_filename = new_filename.split('.fits')[0] + "_novar.fits"
             binned_cube_novar.write(new_filename, savemask=False)
+    
+if __name__ == "__main__":
+
+
+    file_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/cgcg453_red_mosaic.fits"
+
+    # Call the function with cgcg453
+    bin_cubes_and_remove_var(
+        x_factor_list=[2, 4],  # can adjust these
+        y_factor_list=[2, 4],  # must match x_factor_list in length
+        cube_list=[file_path],
+        redshift=0.025  # this galaxy's redshift
+    )
