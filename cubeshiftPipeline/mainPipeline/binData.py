@@ -4,7 +4,8 @@ from astropy.cosmology import Planck18 as cosmo
 import astropy.units as u
 from scipy.ndimage import zoom
 import matplotlib.pyplot as plt
-from reprojectBinData import construct_target_header, reproject_cube
+from reprojectBinData import reproject_cube_preserve_wcs
+from astropy.wcs import WCS as AstropyWCS 
 
 
 def calc_proper_dist(z):
@@ -498,10 +499,22 @@ if __name__ == "__main__":
             # Construct the new target header with updated pixel scale
             x_scale = orig_pixscale * bin_factor
             y_scale = orig_pixscale * bin_factor
-            target_header = construct_target_header(cube, x_pixel_scale_arcsec=x_scale, y_pixel_scale_arcsec=y_scale)
+            # Create new WCS with updated pixel scales
+            original_header = cube.wcs.to_header()
+            original_wcs_astropy = AstropyWCS(original_header)
+            spatial_wcs = original_wcs_astropy.sub([1, 2])
+            target_header = spatial_wcs.to_header()
 
-            # Use your reproject function to resample with WCS
-            cube_resampled = reproject_cube(cube, target_header)
+            target_header['CDELT1'] = -x_scale / 3600.0  # arcsec → deg
+            target_header['CDELT2'] =  y_scale / 3600.0
+            ny, nx = cube.shape[1:]
+            target_header['NAXIS1'] = nx
+            target_header['NAXIS2'] = ny
+
+            target_wcs = AstropyWCS(target_header)
+            shape_out = (ny, nx)
+            cube_resampled = reproject_cube_preserve_wcs(cube, target_wcs, shape_out)
+
         else:
             print(" No valid WCS found — falling back to simple binning.")
             cube_resampled = bin_cube(bin_factor, bin_factor, cube)

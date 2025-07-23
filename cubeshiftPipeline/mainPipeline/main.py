@@ -6,8 +6,10 @@ from matchSpectral import precomputed_match_spectral_resolution_variable_kernel,
 from zWavelengths import redshift_wavelength_axis
 from binData import bin_cube, calculate_spatial_resampling_factor, abs_calculate_spatial_resampling_factor
 from simulateObs import scale_luminosity_for_redshift, convolve_to_match_psf
-from reprojectBinData import construct_target_header, reproject_cube
+from reprojectBinData import reproject_cube_preserve_wcs
 import numpy as np
+from astropy.wcs import WCS as AstropyWCS
+
 
 
 # Get rid of provisional numbers from tests and use telescope dictionary instead
@@ -127,17 +129,26 @@ def simulate_observation(cube, telescope_name, z_obs=None):
     # Step 5 
     cube = precomputed_match_spectral_resolution_variable_kernel(cube_psf, R_input=3000, R_target=1000)
 
-    # Step 6
-    target_header = construct_target_header(
-        cube,
-        x_pixel_scale_arcsec=telescope.pixel_scale_x,
-        y_pixel_scale_arcsec=telescope.pixel_scale_y
-    )
-    print(f"Target header CDELT1 (RA): {target_header['CDELT1'] * 3600:.4f} arcsec")
-    print(f"Target header CDELT2 (DEC): {target_header['CDELT2'] * 3600:.4f} arcsec")
 
+    # STEP 6: Reproject spatially to match target pixel scale
+    original_header = cube.wcs.to_header()
+    original_wcs_astropy = AstropyWCS(original_header)
 
-    cube = reproject_cube(cube, target_header)
+    # Extract spatial 2D WCS
+    spatial_wcs = original_wcs_astropy.sub([1, 2])
+    target_header = spatial_wcs.to_header()
+    target_header['CDELT1'] = -telescope.pixel_scale_x / 3600.0
+    target_header['CDELT2'] = telescope.pixel_scale_y / 3600.0
+
+    ny, nx = cube.shape[1:]  # Spatial shape
+    target_header['NAXIS1'] = nx
+    target_header['NAXIS2'] = ny
+
+    target_spatial_wcs_astropy = AstropyWCS(target_header)
+    shape_out = (ny, nx)
+
+    cube = reproject_cube_preserve_wcs(cube, target_spatial_wcs_astropy, shape_out)
+    
 
     # Step 7 
     telescope = telescope_specs[telescope_name]  # e.g., "JWST_NIRCam"
@@ -162,6 +173,9 @@ z_obs = 0.025  # Original observed redshift
 
 simulated_cube = simulate_observation(cube, "JWST_NIRCam", z_obs)
 
-simulated_cube.write("JWST_simulated_cube.fits")
+output_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/final_simulated_cube.fits"
+simulated_cube.write(output_path)
+
+print(f" Simulated FITS cube saved to: {output_path}")
 
 

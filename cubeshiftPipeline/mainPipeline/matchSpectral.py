@@ -196,7 +196,7 @@ def precomputed_match_spectral_resolution_variable_kernel(cube, R_input, R_targe
             # Fill in any NaNs with interpolated values
             spectrum = fill_nans_spectrum(spectrum)
             # Create an empty array to store the smoothed spectrum
-            smoothed = np.zeros_like(spectrum)
+            smoothed = np.zeros_like(spectrum) # move to outside loop
 
             # Loop over each wavelength bin
             for i in range(n_wave):
@@ -282,6 +282,7 @@ def resample_spectral_axis(cube, new_wave_axis):
 
 
 if __name__ == "__main__":
+    # save to a seperate file
     # Load your cube
     file_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/cgcg453_red_mosaic.fits"
     cube = Cube(file_path)
@@ -305,7 +306,7 @@ if __name__ == "__main__":
     resampled_cube = resample_spectral_axis(cube, new_wave_axis)
 
     # Plot to compare original vs resampled spectrum at central spaxel
-
+    # 
     y0, x0 = cube.shape[1] // 2, cube.shape[2] // 2
     original_spec = cube.data[:, y0, x0]
     resampled_spec = resampled_cube.data[:, y0, x0]
