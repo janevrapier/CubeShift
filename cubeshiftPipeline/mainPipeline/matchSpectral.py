@@ -13,8 +13,185 @@ from astropy import units as u
 import numpy as np
 from mpdaf.obj import Cube, WaveCoord
 import copy
+from zWavelengths import redshift_wavelength_axis
+import os
+from astropy.io import fits
 
 
+
+
+# Wavelengths in microns (μm)
+nirspec_dispersers = [
+    {"name": "g140m", "R": 1000, "lambda_min": 0.70, "lambda_max": 1.27},
+    {"name": "g235m", "R": 1000, "lambda_min": 1.66, "lambda_max": 3.07},
+    {"name": "g395m", "R": 1000, "lambda_min": 2.87, "lambda_max": 5.10},
+    {"name": "g140h", "R": 2700, "lambda_min": 0.81, "lambda_max": 1.27},
+    {"name": "g235h", "R": 2700, "lambda_min": 1.66, "lambda_max": 3.05},
+    {"name": "g395h", "R": 2700, "lambda_min": 2.87, "lambda_max": 5.14},
+    {"name": "prism", "R": 100, "lambda_min": 0.60, "lambda_max": 5.30},
+]
+def crop_cube_to_wavelength_range(cube, lambda_min, lambda_max):
+    """
+    Crops the MPDAF cube along the spectral axis to only include wavelengths
+    within [lambda_min, lambda_max].
+
+    Parameters:
+        cube         -- MPDAF Cube object
+        lambda_min   -- minimum wavelength to keep (float)
+        lambda_max   -- maximum wavelength to keep (float)
+
+    Returns:
+        cropped_cube -- new MPDAF Cube containing only the selected spectral range
+    """
+    wave_axis = cube.wave.coord()
+    mask = (wave_axis >= lambda_min) & (wave_axis <= lambda_max)
+    print(f"Attempting to crop to {lambda_min:.3f}–{lambda_max:.3f} μm ({lambda_min*1e4:.0f}–{lambda_max*1e4:.0f} Å)")
+    print(cube.wave)               # If you're using MPDAF
+    print(cube.wave.unit)   # Should return u.um, u.AA, etc.
+    wave_axis = cube.wave.coord()
+    print(wave_axis[0], wave_axis[-1])
+
+
+
+    if np.sum(mask) == 0:
+        raise ValueError("No wavelengths fall within the specified range.")
+
+    cropped_data = cube.data[mask, :, :]
+    cropped_wave = wave_axis[mask]
+    cropped_wavecoord = create_wavecoord_from_axis(cropped_wave)
+
+    return Cube(data=cropped_data, wave=cropped_wavecoord, wcs=cube.wcs)
+
+
+
+def select_best_disperser_with_partial(cube, lam_obs_min, lam_obs_max, crop_cube_if_needed=True):
+    """
+    Selects best disperser for the observed wavelength range.
+    If full coverage isn't possible, but a filter covers >50%,
+    it crops the cube to that filter's wavelength range.
+    
+    Returns:
+        (selected_filter_dict, possibly_cropped_cube)
+    """
+    print(f"\nObserved wavelength range: {lam_obs_min:.3f} – {lam_obs_max:.3f} μm")
+    full_matches = []
+
+    for combo in nirspec_dispersers:
+        name = combo["name"]
+        lambda_min = combo["lambda_min"]
+        lambda_max = combo["lambda_max"]
+
+        print(f"\nChecking {name}: {lambda_min:.3f}–{lambda_max:.3f} μm")
+        
+        # Full coverage check
+        if lam_obs_min >= lambda_min and lam_obs_max <= lambda_max:
+            print(f" ✅ Full coverage with {name}")
+            full_matches.append((combo, lambda_max - lambda_min))  # Save width for ranking
+            continue  # Go to next filter
+
+        # Partial overlap calculation
+        overlap = max(0, min(lam_obs_max, lambda_max) - max(lam_obs_min, lambda_min))
+        coverage_fraction = overlap / (lam_obs_max - lam_obs_min)
+        print(f"Overlap = {overlap:.3f} μm, Coverage fraction = {coverage_fraction:.2%}")
+
+        if coverage_fraction > 0.5 and crop_cube_if_needed:
+            print(f"⚠️ More than 50% falls within {name}. Attempting to crop.")
+            lam_overlap_min = max(lambda_min, lam_obs_min)
+            lam_overlap_max = min(lambda_max, lam_obs_max)
+
+            if lam_overlap_max > lam_overlap_min:
+                print(f" Cropping cube to: {lam_overlap_min:.3f}–{lam_overlap_max:.3f} μm "
+                      f"({lam_overlap_min*1e4:.0f}–{lam_overlap_max*1e4:.0f} Å)")
+                cube = crop_cube_to_wavelength_range(cube, lam_overlap_min * 1e4, lam_overlap_max * 1e4)
+                return combo, cube
+            else:
+                print("Warning: invalid overlap range. Skipping crop.")
+
+    # Prefer narrowest full coverage if any exist
+    if full_matches:
+        best_full = sorted(full_matches, key=lambda x: x[1])[0][0]
+        print(f"\n Using fully-covered filter: {best_full['name']}")
+        return best_full, cube
+
+    # Fallback: PRISM
+    for combo in nirspec_dispersers:
+        if combo["name"].lower() == "prism":
+            print("\n No good match found. Falling back to PRISM.")
+            return combo, cube
+
+    raise ValueError("No suitable disperser found.")
+
+
+
+def R_input_func(wave_angstrom):
+    """
+    wave_angstrom: numpy array of wavelengths in Angstroms
+    Returns interpolated R values at those wavelengths.
+    """
+    wave_micron = wave_angstrom * 1e-4  # convert Angstrom to microns
+    
+    # known wavelengths and R values from your dispersion data (microns)
+    # make sure these are global or passed in some way; here I assume they're available
+    
+    return np.interp(wave_micron, wave_um, R_vals, left=R_vals[0], right=R_vals[-1])
+
+def load_dispersion_file(filter_name, dispersion_dir):
+    """
+    Load dispersion data from a JWST NIRSpec FITS file.
+    
+    Parameters:
+        filter_name (str): e.g. "G140H_F100LP"
+        dispersion_dir (str): path to folder containing dispersion FITS files
+
+    Returns:
+        np.ndarray: Nx2 array, columns = [wavelength (µm), R]
+    """
+    # Construct expected FITS filename
+    fname = dispersion_filename = f"jwst_nirspec_{filter_name.lower()}_disp.fits"
+
+    file_path = os.path.join(dispersion_dir, fname)
+
+    if not os.path.isfile(file_path):
+        raise FileNotFoundError(f"Dispersion FITS file not found: {file_path}")
+
+    # Open FITS file
+    with fits.open(file_path) as hdul:
+        # Usually dispersion data is in HDU[1] as a table
+        data = hdul[1].data
+        
+        # JWST files typically have columns like 'WAVELENGTH' and 'R'
+        # Wavelength is in microns, R is dimensionless
+        wavelength = data['WAVELENGTH']  # in µm
+        R = data['R']
+
+        return np.column_stack([wavelength, R])
+
+
+def select_best_disperser(lam_obs_min, lam_obs_max):
+    """
+    Select the best NIRSpec disperser-filter combination that fully covers
+    the observed wavelength range [lam_obs_min, lam_obs_max] in microns.
+    
+    Priority is given to the smallest wavelength range that covers the input.
+    """
+    matches = []
+
+    for combo in nirspec_dispersers:
+        if lam_obs_min >= combo["lambda_min"] and lam_obs_max <= combo["lambda_max"]:
+            matches.append(combo)
+            print(matches)
+
+    if matches:
+        # Choose the narrowest coverage (highest resolution with least excess range)
+        best = sorted(matches, key=lambda x: x["lambda_max"] - x["lambda_min"])[0]
+        return best
+
+    # Fallback: try PRISM if no high-res option fits
+    for combo in nirspec_dispersers:
+        if combo["name"] == "PRISM_CLEAR":
+            return combo
+
+    raise ValueError("No suitable NIRSpec disperser-filter combination found.")
 
 def to_nan_array(arr):
     """Convert a masked array to a float array with NaNs where masked."""
@@ -37,112 +214,8 @@ def fill_nans_spectrum(spectrum):
     return interp(idx)
 
 
-def match_spectral_resolution(cube, R_input, R_target):
-    # VERSION 1 (stationary - not variable)
-    """
-    Matches spectral resolution of an MPDAF cube by convolving each spectrum 
-    with a 1D Gaussian kernel.
 
-    Parameters:
-        cube      -- MPDAF Cube object
-        R_input   -- original spectral resolution (λ / Δλ)
-        R_target  -- desired spectral resolution (must be lower than R_input)
-
-    Returns:
-        cube      -- resolution-matched cube
-    """
-    print("Matching spectral resolution...")
-
-    wave = cube.wave.coord()  # get wavelength array
-    delta_lambda = wave[1] - wave[0]  # spectral pixel size in Å
-
-    fwhm_input = wave / R_input
-    fwhm_target = wave / R_target
-    fwhm_kernel = np.sqrt(np.maximum(fwhm_target**2 - fwhm_input**2, 0))  # avoid negative sqrt
-
-    # Convert FWHM to sigma (in pixels)
-    sigma_pix = (fwhm_kernel / delta_lambda) / 2.355
-
-    # Use central value for constant-kernel convolution
-    sigma = sigma_pix[len(sigma_pix) // 2]
-    kernel = Gaussian1DKernel(sigma)
-
-    print("Cube shape:", cube.data.shape)
-    print("Cube dtype:", cube.data.dtype)
-    print("NaNs in cube:", np.isnan(cube.data).sum())
-
-
-    for y in range(cube.shape[1]):
-        for x in range(cube.shape[2]):
-            spectrum = to_nan_array(cube.data[:, y, x])
-            idx = np.arange(len(spectrum))
-            good = np.isfinite(spectrum)
-
-            if good.sum() < 2:
-                print(f" Skipping spaxel (y={y}, x={x}) — only {good.sum()} good points")
-                print("Spectrum preview:", spectrum[:10])
-                continue
-
-            filled = fill_nans_spectrum(spectrum)
-            cube.data[:, y, x] = convolve(filled, kernel, boundary='extend')
-
-    if isinstance(cube.data[:, y, x], ma.MaskedArray):
-        print(f"Spaxel ({y},{x}) is a masked array.")
-
-
-
-    print("Spectral resolution matching complete.")
-    return cube
-
-
-
-def match_spectral_resolution_variable_kernel(cube, R_input, R_target):
-    # Version 2 (variable but very time consuming)
-    """
-    Matches spectral resolution by convolving each wavelength bin with 
-    a wavelength-dependent Gaussian kernel.
-
-    Parameters:
-        cube      -- MPDAF Cube
-        R_input   -- original spectral resolution (λ / Δλ)
-        R_target  -- desired spectral resolution
-
-    Returns:
-        cube      -- resolution-matched cube
-    """
-    print("Matching spectral resolution with variable kernel...")
-
-    new_cube = cube.copy()
-    wave = cube.wave.coord()
-    delta_lambda = wave[1] - wave[0]
-
-    fwhm_input = wave / R_input
-    fwhm_target = wave / R_target
-    fwhm_kernel = np.sqrt(np.maximum(fwhm_target**2 - fwhm_input**2, 0))
-    sigma_kernel_pix = fwhm_kernel / delta_lambda / 2.355
-
-    n_wave = cube.shape[0]
-
-    for y in range(cube.shape[1]):
-        for x in range(cube.shape[2]):
-            spectrum = to_nan_array(cube.data[:, y, x])
-            spectrum = fill_nans_spectrum(spectrum)
-            smoothed = np.zeros_like(spectrum)
-
-            for i in range(n_wave):
-                delta = np.zeros_like(spectrum)
-                delta[i] = 1.0
-                kernel = gaussian_filter1d(delta, sigma=sigma_kernel_pix[i], mode='constant')
-                smoothed[i] = np.nansum(spectrum * kernel)
-
-            new_cube.data[:, y, x] = smoothed
-
-    print(" Spectral resolution matched using variable kernel.")
-    return new_cube
-
-
-
-def precomputed_match_spectral_resolution_variable_kernel(cube, R_input, R_target):
+def precomputed_match_spectral_resolution_variable_kernel(cube, R_input_interpolated, R_target):
     # Version 3 (final version - )
     """
     Matches spectral resolution by convolving each wavelength bin with 
@@ -159,8 +232,12 @@ def precomputed_match_spectral_resolution_variable_kernel(cube, R_input, R_targe
     """
     print("Matching precomputed spectral resolution with variable kernel...")
 
+
+
     new_cube = cube.copy()
     wave = cube.wave.coord()
+
+
     # Calculate the wavelength step size (assumes constant spacing)
     delta_lambda = wave[1] - wave[0]
     # Get number of wavelength bins (spectral dimension)
@@ -168,7 +245,9 @@ def precomputed_match_spectral_resolution_variable_kernel(cube, R_input, R_targe
 
     # --- STEP 1: Compute Gaussian kernel widths ---
     # FWHM (Full Width at Half Maximum) of the current spectral resolution
+    R_input = R_input_interpolated  # array of same length as wave
     fwhm_input = wave / R_input
+
     # FWHM of the target (lower) spectral resolution
     fwhm_target = wave / R_target
     # Compute the FWHM of the Gaussian kernel needed to degrade from input to target resolution
@@ -180,14 +259,19 @@ def precomputed_match_spectral_resolution_variable_kernel(cube, R_input, R_targe
     # --- STEP 2: Precompute all Gaussian kernels ---
     print(" Precomputing kernels...")
     kernel_bank = []
+
     for sigma in sigma_kernel_pix:
-        # Create a delta function (1 at center, 0 elsewhere) the same length as the spectrum
-        delta = np.zeros(n_wave)
-        delta[n_wave // 2] = 1.0  # centered delta function
-        # Apply Gaussian smoothing to the delta function to create the kernel
-        # Each kernel is centered and ready to be rolled into place later
-        kernel = gaussian_filter1d(delta, sigma=sigma, mode='constant')
+        if sigma == 0 or np.isnan(sigma):
+            kernel = np.zeros(n_wave)
+            kernel[n_wave // 2] = 1.0  # delta function (no blur)
+        else:
+            delta = np.zeros(n_wave)
+            delta[n_wave // 2] = 1.0
+            kernel = gaussian_filter1d(delta, sigma=sigma, mode='constant')
         kernel_bank.append(kernel)
+
+
+
 
     # --- STEP 3: Convolve each spaxel spectrum using precomputed kernels ---
     for y in range(cube.shape[1]): # loop over spatial Y pixels
@@ -210,8 +294,6 @@ def precomputed_match_spectral_resolution_variable_kernel(cube, R_input, R_targe
 
     print(" Spectral resolution matched using variable kernel.")
     return new_cube
-
-
 
 
 def create_wavecoord_from_axis(new_wave_axis):
@@ -272,85 +354,235 @@ def resample_spectral_axis(cube, new_wave_axis):
 
     # --- STEP 2: Define a new spectral coordinate system for the resampled axis ---
     new_wave = create_wavecoord_from_axis(new_wave_axis)
-   
-    # --- STEP 3: Build a new cube with resampled data and new spectral axis ---
-    # Keep the spatial WCS (coordinate system) the same
-    resampled_cube = Cube(data=new_data, wave=new_wave, wcs=cube.wcs)
 
+    # Determine overlapping spectral range between old and new
+    # Overlapping range between old and new wavelengths
+    old_min, old_max = old_wave[0], old_wave[-1]
+    new_min, new_max = new_wave_axis[0], new_wave_axis[-1]
+    min_wave = max(old_min, new_min)
+    max_wave = min(old_max, new_max)
+
+    # Mask for overlapping wavelengths
+    # --- STEP 3: trim to overlap (optional) ---
+    mask = (new_wave_axis >= old_wave[0]) & (new_wave_axis <= old_wave[-1])
+    trimmed_wave_axis = new_wave_axis[mask]
+    new_data_trimmed    = new_data[mask, :, :]
+
+    # Build a WaveCoord even if Δλ varies:
+    new_wave_trimmed = create_wavecoord_from_axis(trimmed_wave_axis)
+    resampled_cube = Cube(data=new_data_trimmed,
+                          wave=new_wave_trimmed,
+                          wcs=cube.wcs)
     print("Spectral axis resampled.")
     return resampled_cube
 
 
+def match_variable_resolution(cube, R_lambda, R_target):
+    """
+    Matches spectral resolution by convolving each wavelength bin 
+    with a Gaussian kernel to degrade the resolution from R_lambda to R_target.
+    
+    Parameters:
+        cube      : MPDAF Cube object
+        R_lambda  : 1D array of input resolving power, one per wavelength bin
+        R_target  : Scalar target resolving power to degrade to
+        
+    Returns:
+        A new Cube object with matched spectral resolution
+    """
+    new_cube = cube.copy()
+    data = new_cube.data
+    var = new_cube.var
+    lam = new_cube.wave.coord()  # in Ångstroms
+
+    # Calculate FWHM and sigma in Å
+    lam = np.asarray(lam)  # shape (Nλ,)
+    fwhm_input = lam / R_lambda              # input FWHM(λ)
+    fwhm_target = lam / R_target             # target FWHM (constant)
+    
+    # Compute Gaussian kernel widths in σ (Å)
+    fwhm_diff_squared = fwhm_target**2 - fwhm_input**2
+    sigma_kernel = np.sqrt(np.maximum(fwhm_diff_squared, 0)) / 2.355  # avoid negative under sqrt
+
+    # Convert sigma from Å to pixels along the spectral axis
+    delta_lambda = np.median(np.diff(lam))  # assume uniform spacing
+    sigma_pixels = sigma_kernel / delta_lambda
+
+    # Apply wavelength-dependent Gaussian smoothing along spectral axis
+    smoothed_data = np.empty_like(data)
+    smoothed_var = np.empty_like(var)
+    for y in range(data.shape[1]):
+        for x in range(data.shape[2]):
+            spectrum = data[:, y, x]
+            variance = var[:, y, x]
+            smoothed_data[:, y, x] = gaussian_filter1d(spectrum, sigma_pixels, mode='nearest')
+            smoothed_var[:, y, x] = gaussian_filter1d(variance, sigma_pixels, mode='nearest')
+
+    new_cube.data = smoothed_data
+    new_cube.var = smoothed_var
+
+    return new_cube
+
+
+def check_nans_inf(cube, label):
+    data = cube.data
+    n_nans = np.isnan(data).sum()
+    n_infs = np.isinf(data).sum()
+    print(f"{label} - NaNs: {n_nans}, Infs: {n_infs}")
+
+
+
+
+
+
+
+
 if __name__ == "__main__":
-    # save to a seperate file
-    # Load your cube
+    
     file_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/cgcg453_red_mosaic.fits"
+    dispersion_dir = r"/Users/janev/Library/Group Containers/UBF8T346G9.OneDriveStandaloneSuite/OneDrive - Queen's University.noindex/OneDrive - Queen's University/MNU 2025/Dispersion Filters"
+
+    # Load the cube
     cube = Cube(file_path)
 
-    # Define new wavelength axis you want to resample to
-    new_wave_axis = np.linspace(11000, 16000, 88)  # Angstroms, e.g. JWST grism bins
-    print("Original wave min/max:", cube.wave.coord()[0], cube.wave.coord()[-1])
-    print("New wave min/max:", new_wave_axis[0], new_wave_axis[-1])
-    
-    # After loading and blurring the cube:
-    start = cube.wave.coord()[0]
-    end = cube.wave.coord()[-1]
-    delta_lambda = 10  # desired new bin width in Angstroms
-    
-
-    new_wave_axis = np.arange(start, end, delta_lambda)
-    print("Interpolating within range:", start, "to", end)
-    print("New axis length:", len(new_wave_axis))
-
-    # Resample
-    resampled_cube = resample_spectral_axis(cube, new_wave_axis)
-
-    # Plot to compare original vs resampled spectrum at central spaxel
-    # 
-    y0, x0 = cube.shape[1] // 2, cube.shape[2] // 2
-    original_spec = cube.data[:, y0, x0]
-    resampled_spec = resampled_cube.data[:, y0, x0]
-
+    print(f"Original cube stats: min={cube.data.min()}, max={cube.data.max()}, mean={cube.data.mean()}")
+    y, x = cube.shape[1] // 2, cube.shape[2] // 2
+    original_spec = cube.data[:, y, x]
     plt.figure()
-    plt.plot(cube.wave.coord(), original_spec, label="Original")
-    plt.plot(new_wave_axis, resampled_spec, label="Resampled", alpha=0.7)
-    plt.xlabel("Wavelength (Å)")
+    plt.plot(cube.wave.coord(), original_spec)
+    plt.title("Original cube central spaxel spectrum")
+    plt.xlabel("Wavelength (Angstrom)")
     plt.ylabel("Flux")
-    plt.legend()
-    plt.title("Spectral Resampling")
     plt.show()
 
-    # Assuming `cube` is your MPDAF cube object
-    # And you're going from e.g. R = 4000 to R = 1000
-    # Later this will be determined by a telescope/instrument dictionary
-    R_input = 4000
-    R_target = 1000
+    z_obs = 0.025
+    z_sim = 2.9
+    redshifted_cube, _ = redshift_wavelength_axis(cube, z_obs, z_sim)
+    redshifted_cube_wave = redshifted_cube.wave.coord() / 1e4  # Convert to microns
 
-    # Pick a bright spaxel manually or automatically
-    # Pick a spaxel and extract original spectrum (before matching)
-    print(type(redshifted_cube))
-    y, x = 50, 50
-    wave = redshifted_cube.wave.coord()
-    original_spectrum = redshifted_cube.data[:, y, x].copy()  
 
-    # Apply spectral resolution matching
-    cube = precomputed_match_spectral_resolution_variable_kernel(cube, R_input, R_target)
+    lam_obs_min = redshifted_cube_wave.min()
+    lam_obs_max = redshifted_cube_wave.max()
 
-    # Extract smoothed spectrum at same spaxel
-    smoothed_spectrum = cube.data[:, y, x]
+    print(f"lam_obs_min = {lam_obs_min}, lam_obs_max = {lam_obs_max}")
+    for combo in nirspec_dispersers:
+        print(f"{combo['name']} → R={combo['R']}, λ = [{combo['lambda_min']}, {combo['lambda_max']}]")
 
-    # Plot before/after
-    plt.figure(figsize=(10, 4))
-    plt.plot(wave, original_spectrum, label='Original', alpha=0.7)
-    plt.plot(wave, smoothed_spectrum, label='Matched (Variable Kernel)', alpha=0.7)
-    plt.xlabel('Wavelength (Å)')
-    plt.ylabel('Flux')
-    plt.title(f'Spectral Resolution Matching at spaxel ({y},{x})')
+    best_disperser,  cube_cropped = select_best_disperser_with_partial(redshifted_cube, lam_obs_min, lam_obs_max)
+    print("DEBUG: Type of cube after cropping:", type(cube_cropped))
+    print("DEBUG: Shape of cube data:", cube_cropped.data.shape)
+
+
+    print(f"Using disperser: {best_disperser['name']}")
+
+    # Select and load disperser
+
+    filter_name = best_disperser["name"]
+    print(f"Selected disperser: {filter_name} with R ≈ {best_disperser['R']}")
+
+
+    dispersion_data = load_dispersion_file(filter_name, dispersion_dir)  # Returns array with [:,0]=wavelength (µm), [:,1]=R
+
+    # Step 1: Resample to the disperser's wavelength grid
+    new_wave_axis = dispersion_data[:, 0] * 1e4  # microns to Angstroms
+    target_R = np.median(dispersion_data[:, 1])  # Representative R value
+    print("DEBUG: cube_cropped.wave is None?", cube_cropped.wave is None)
+
+    print("Resampling cube to match dispersion wavelength axis...")
+
+    resampled_cube = resample_spectral_axis(cube_cropped, new_wave_axis)
+
+    print(f"After resample: min={resampled_cube.data.min()}, max={resampled_cube.data.max()}, mean={resampled_cube.data.mean()}")
+    resampled_spec = resampled_cube.data[:, y, x]
+    plt.figure()
+    plt.plot(resampled_cube.wave.coord(), resampled_spec)
+    plt.title("Resampled cube central spaxel spectrum")
+    plt.xlabel("Wavelength (Angstrom)")
+    plt.ylabel("Flux")
+    plt.show()
+
+    wave_um = dispersion_data[:, 0]  # microns
+    R_vals = dispersion_data[:, 1]
+    target_R = np.median(R_vals)  # or your chosen target resolution
+
+
+    # new_wave_axis: the cube's current wavelength array in microns (same length as wave)
+    new_wave_axis = resampled_cube.wave.coord() 
+
+    # wave_um and R_vals come from your disperser dispersion data (original)
+    # Interpolate R_vals onto new_wave_axis
+    wave_ang = resampled_cube.wave.coord()   # Angstroms
+    wave_um = wave_ang / 1e4                 # convert to microns
+    R_input_interp = np.interp(wave_um, dispersion_data[:, 0], R_vals)
+    R_input_interpolated = np.clip(R_input_interp, 10, 10000)
+
+
+    plt.figure()
+    plt.plot(new_wave_axis, R_input_interpolated, label='Input R (interp)')
+    plt.axhline(target_R, color='r', linestyle='--', label='Target R')
+    plt.title("Spectral Resolution R vs Wavelength")
+    plt.xlabel("Wavelength (micron)")
+    plt.ylabel("Resolution R")
+    plt.legend()
+    plt.show()
+
+    print(f"Input R: min={np.min(R_input_interpolated)}, max={np.max(R_input_interpolated)}")
+    print(f"Target R: {target_R}")
+
+
+    print("Before blur: mean =", np.mean(resampled_cube.data))
+    print("Interpolated R: min =", np.min(R_input_interpolated), "max =", np.max(R_input_interpolated))
+    print("Target R:", target_R)
+
+    blurred_cube = precomputed_match_spectral_resolution_variable_kernel(
+        resampled_cube, R_input_interpolated, target_R
+    )
+
+    print("After blur: mean =", np.mean(blurred_cube.data))
+
+    # Step 3: Plot comparison at central spaxel
+    y, x = blurred_cube.shape[1] // 2, blurred_cube.shape[2] // 2
+    original_spec = resampled_cube.data[:, y, x]
+    smoothed_spec = blurred_cube.data[:, y, x]
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(new_wave_axis, original_spec, label="Resampled", alpha=0.6)
+    plt.plot(new_wave_axis, smoothed_spec, label="Matched R", alpha=0.7)
+    plt.xlabel("Wavelength (Å)")
+    plt.ylabel("Flux")
+    plt.title(f"Spectral Matching at Spaxel ({y}, {x})")
     plt.legend()
     plt.tight_layout()
     plt.show()
 
-    print("Spectral resolution matching complete.")
+    print(f"Before blur: mean = {resampled_cube.data.mean()}")
+    blurred_cube = precomputed_match_spectral_resolution_variable_kernel(
+        resampled_cube, R_input_interpolated, target_R
+    )
+    print(f"After blur: mean = {blurred_cube.data.mean()}")
 
+    blurred_spec = blurred_cube.data[:, y, x]
+    plt.figure()
+    plt.plot(blurred_cube.wave.coord(), blurred_spec, label='Blurred spectrum')
+    plt.plot(resampled_cube.wave.coord(), resampled_spec, alpha=0.5, label='Resampled spectrum')
+    plt.title("Spectrum Before and After Spectral Resolution Matching")
+    plt.xlabel("Wavelength (Angstrom)")
+    plt.ylabel("Flux")
+    plt.legend()
+    plt.show()
 
+    print("Resampling and resolution matching complete.")
+    check_nans_inf(cube, "Original cube")
+    check_nans_inf(resampled_cube, "Resampled cube")
+    check_nans_inf(blurred_cube, "Blurred cube")
 
+    # After you write the file...
+    output_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/spectral_matched_cube_with_despersion.fits"
+    blurred_cube.write(output_path)
+
+    # Now immediately read it back in and print stats:
+    reloaded = Cube(output_path)
+    print("Reloaded cube stats:", 
+        "min=", np.nanmin(reloaded.data), 
+        "max=", np.nanmax(reloaded.data), 
+        "mean=", np.nanmean(reloaded.data))

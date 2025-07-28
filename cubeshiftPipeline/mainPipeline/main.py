@@ -9,6 +9,7 @@ from simulateObs import scale_luminosity_for_redshift, convolve_to_match_psf
 from reprojectBinData import reproject_cube_preserve_wcs
 import numpy as np
 from astropy.wcs import WCS as AstropyWCS
+from cropCube import auto_crop_cube
 
 
 
@@ -37,6 +38,15 @@ telescope_specs = {
         pixel_scale_y=0.063,  # arcsec/pixel
         spatial_fwhm=0.07,    # arcsec -- simulating around F200W filter 
         spectral_resolution=1000 # resolving power!
+    ),
+        "VLT_MUSE": Telescope(
+        name="VLT MUSE",
+        z=0.6,
+        pixel_scale_x=0.2,     # arcsec/pixel
+        pixel_scale_y=0.2,
+        spatial_fwhm=0.6,      # arcsec (typical seeing-limited PSF in WFM)
+        spectral_resolution=3000,
+        spectral_sampling=1.25  # Å (typical for MUSE WFM)
     ),
 
     # Add other telescopes
@@ -166,16 +176,62 @@ def simulate_observation(cube, telescope_name, z_obs=None):
     return cube
 
 
-file_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/cgcg453_red_mosaic.fits"
-cube = Cube(file_path)
+def test_JWST_full_pipeline():
+    file_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/cgcg453_red_mosaic.fits"
+    cube = Cube(file_path)
 
-z_obs = 0.025  # Original observed redshift
+    z_obs = 0.025  # Original observed redshift
 
-simulated_cube = simulate_observation(cube, "JWST_NIRCam", z_obs)
+    simulated_cube = simulate_observation(cube, "JWST_NIRCam", z_obs)
 
-output_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/final_simulated_cube.fits"
-simulated_cube.write(output_path)
+    output_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/final_simulated_cube.fits"
+    simulated_cube.write(output_path)
 
-print(f" Simulated FITS cube saved to: {output_path}")
+    print(f" Simulated FITS cube saved to: {output_path}")
 
 
+def test_MUSE_FOV():
+    file_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/cgcg453_red_mosaic.fits"
+    cube = Cube(file_path)
+
+    # Step 1: Redshift wavelength axis
+    z_old = 0.025
+    telescope = telescope_specs["VLT_MUSE"]
+    z_new = telescope.z
+
+    print(f"Redshifting from z = {z_old} to z = {z_new}")
+    redshifted_cube, _ = redshift_wavelength_axis(cube, z_old, z_new)
+
+    # Step 2: Reproject spatially to match target pixel scale
+    # Get original WCS
+    original_header = redshifted_cube.wcs.to_header()
+    original_wcs_astropy = AstropyWCS(original_header)
+
+    # Build 2D spatial WCS
+    spatial_wcs = original_wcs_astropy.sub([1, 2])
+    target_header = spatial_wcs.to_header()
+    target_header['CDELT1'] = -telescope.pixel_scale_x / 3600.0
+    target_header['CDELT2'] = telescope.pixel_scale_y / 3600.0
+
+    # Set output shape same as input (you can adjust this later if needed)
+    ny, nx = redshifted_cube.shape[1:]
+    target_header['NAXIS1'] = nx
+    target_header['NAXIS2'] = ny
+
+    target_wcs = AstropyWCS(target_header)
+    shape_out = (ny, nx)
+
+    print("Reprojecting to match MUSE pixel scale")
+    reprojected_cube = reproject_cube_preserve_wcs(redshifted_cube, target_wcs, shape_out)
+
+    # Step 3: Crop to nonzero region (if needed)
+    print("Cropping to region with signal...")
+    cropped_cube = auto_crop_cube(reprojected_cube)
+
+    # Save output
+    output_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/kcwi_to_muse_prelim.fits"
+    cropped_cube.write(output_path)
+
+    print(f" Saved redshifted, reprojected, cropped cube to:\n{output_path}")
+
+test_MUSE_FOV()

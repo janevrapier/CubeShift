@@ -158,47 +158,6 @@ def construct_target_wcs_mpdaf(cube, x_pixel_scale_arcsec, y_pixel_scale_arcsec)
     return wcs
 
 
-def reproject_cube_with_wcs(cube, target_wcs_mpdaf, shape_out=None):
-    """
-    Reproject spatial dimensions of a spectral cube to a target MPDAF WCS.
-
-    Parameters:
-        cube: MPDAF Cube object
-        target_wcs_mpdaf: MPDAF WCS object defining target spatial WCS
-        shape_out: tuple (ny, nx) output spatial shape; defaults to input cube shape
-
-    Returns:
-        New MPDAF Cube object with reprojected spatial axes
-    """
-    print("Reprojecting cube ...")
-
-    data = cube.data.data  # shape: (spectral, y, x)
-
-    if shape_out is None:
-        shape_out = (cube.shape[1], cube.shape[2])  # default spatial shape
-
-    reprojected_data = np.empty((data.shape[0], shape_out[0], shape_out[1]), dtype=data.dtype)
-
-    astropy_header_in = cube.wcs.to_header()
-    astropy_header_out = target_wcs_mpdaf.to_header()
-
-    for i in range(data.shape[0]):
-        slice2d = data[i]
-        reprojected_slice, _ = reproject_interp(
-            (slice2d, astropy_header_in),
-            astropy_header_out,
-            shape_out=shape_out
-        )
-        reprojected_data[i] = reprojected_slice
-
-    hdu = fits.PrimaryHDU(header=astropy_header_out)
-    new_wcs = coords.WCS(hdu.header)
-
-
-    new_cube = Cube(data=reprojected_data, wcs=new_wcs, wave=cube.wave.copy(), unit=cube.unit)
-
-    print("Done reprojecting cube.")
-    return new_cube
 
 
 def calculate_spatial_resampling_factor(z_old, z_new, original_pixel_scale_arcsec, target_telescope_resolution_arcsec):
@@ -277,9 +236,9 @@ def check_wcs_headers_match(original_wcs, output_fits_path):
             print(f"⚠️ Missing key {key} in one of the headers.")
             continue
         if np.allclose(float(val_orig), float(val_saved), rtol=1e-6):
-            print(f"✅ {key} matches: {val_orig}")
+            print(f" {key} matches: {val_orig}")
         else:
-            print(f"❌ {key} mismatch: original={val_orig}, saved={val_saved}")
+            print(f" {key} mismatch: original={val_orig}, saved={val_saved}")
     print("--- Done ---\n")
 
 if __name__ == "__main__":
