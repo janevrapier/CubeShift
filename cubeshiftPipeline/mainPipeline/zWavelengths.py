@@ -8,10 +8,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 from mpdaf.obj import Cube, WaveCoord
 from scipy.interpolate import interp1d
-
 from mpdaf.obj import Cube, WaveCoord
 import numpy as np
 from copy import deepcopy
+
 
 
 

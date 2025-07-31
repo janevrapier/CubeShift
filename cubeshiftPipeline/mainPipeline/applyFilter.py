@@ -118,6 +118,9 @@ def apply_nirspec_throughput(cube, z, line_rest_wavelength, filter_dir):
     print(f"Applying filter: {fname} (covers {wave.min():.2f}–{wave.max():.2f} µm)")
 
     # Interpolate transmission at cube wavelengths
+    if cube.wave is None:
+        raise ValueError("Cube has no spectral axis (cube.wave is None)")
+
     cube_waves_um = cube.wave.coord() / 1e4  # Cube wavelengths in µm
     interp = interp1d(wave, trans, bounds_error=False, fill_value=0.0)
     throughput = interp(cube_waves_um)
@@ -183,6 +186,27 @@ def plot_results(filtered_cube):
     plt.title('Broadband image after filter applied')
     plt.show()
 
+def apply_transmission_filter(cube, z, line_rest_wavelength):
+    """
+    Applies the appropriate transmission filter and returns cube + filter name.
+    """
+    # path to NIRSpec transmission filters:
+    filter_dir = r"/Users/janev/Library/Group Containers/UBF8T346G9.OneDriveStandaloneSuite/OneDrive - Queen's University.noindex/OneDrive - Queen's University/MNU 2025/Transmission Filters"
+    print(f"Cube type: {type(cube)}")
+    print(f"Wave object: {cube.wave}")
+
+    filtered_cube, wave, throughput = apply_nirspec_throughput(cube, z, line_rest_wavelength, filter_dir)
+    
+    # Extract name from filename (e.g., jwst_nirspec_f070lp_trans.fits → f070lp)
+    filter_name = "unknown"
+    for fname in os.listdir(filter_dir):
+        if fname.endswith("_trans.fits"):
+            wl, thr = load_filter_transmission(os.path.join(filter_dir, fname))
+            if np.allclose(wl, wave) and np.allclose(thr, throughput):
+                filter_name = fname.split("_")[2]  # 'f070lp' from 'jwst_nirspec_f070lp_trans.fits'
+                break
+
+    return filtered_cube, filter_name
 
 if __name__ == "__main__":
     file_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/cgcg453_red_mosaic.fits"

@@ -85,7 +85,7 @@ def select_best_disperser_with_partial(cube, lam_obs_min, lam_obs_max, crop_cube
         
         # Full coverage check
         if lam_obs_min >= lambda_min and lam_obs_max <= lambda_max:
-            print(f" ✅ Full coverage with {name}")
+            print(f"  Full coverage with {name}")
             full_matches.append((combo, lambda_max - lambda_min))  # Save width for ranking
             continue  # Go to next filter
 
@@ -95,7 +95,7 @@ def select_best_disperser_with_partial(cube, lam_obs_min, lam_obs_max, crop_cube
         print(f"Overlap = {overlap:.3f} μm, Coverage fraction = {coverage_fraction:.2%}")
 
         if coverage_fraction > 0.5 and crop_cube_if_needed:
-            print(f"⚠️ More than 50% falls within {name}. Attempting to crop.")
+            print(f" More than 50% falls within {name}. Attempting to crop.")
             lam_overlap_min = max(lambda_min, lam_obs_min)
             lam_overlap_max = min(lambda_max, lam_obs_max)
 
@@ -166,32 +166,6 @@ def load_dispersion_file(filter_name, dispersion_dir):
 
         return np.column_stack([wavelength, R])
 
-
-def select_best_disperser(lam_obs_min, lam_obs_max):
-    """
-    Select the best NIRSpec disperser-filter combination that fully covers
-    the observed wavelength range [lam_obs_min, lam_obs_max] in microns.
-    
-    Priority is given to the smallest wavelength range that covers the input.
-    """
-    matches = []
-
-    for combo in nirspec_dispersers:
-        if lam_obs_min >= combo["lambda_min"] and lam_obs_max <= combo["lambda_max"]:
-            matches.append(combo)
-            print(matches)
-
-    if matches:
-        # Choose the narrowest coverage (highest resolution with least excess range)
-        best = sorted(matches, key=lambda x: x["lambda_max"] - x["lambda_min"])[0]
-        return best
-
-    # Fallback: try PRISM if no high-res option fits
-    for combo in nirspec_dispersers:
-        if combo["name"] == "PRISM_CLEAR":
-            return combo
-
-    raise ValueError("No suitable NIRSpec disperser-filter combination found.")
 
 def to_nan_array(arr):
     """Convert a masked array to a float array with NaNs where masked."""
@@ -433,6 +407,58 @@ def check_nans_inf(cube, label):
 
 
 
+def apply_dispersion_pipeline(redshifted_cube, z_obs, z_sim):
+    """
+    Applies the NIRSpec disperser pipeline:
+    - Redshifts the cube
+    - Crops to overlapping dispersion range
+    - Loads and applies dispersion filter
+    - Resamples cube to dispersion wavelength axis
+    - Matches spectral resolution using precomputed kernel
+    
+    Parameters:
+        cube (MPDAF Cube): The input observed cube
+        z_obs (float): Observed redshift of the cube
+        z_sim (float): Target redshift for simulation
+        dispersion_dir (str): Directory containing dispersion filter files
+    
+    Returns:
+        blurred_cube (MPDAF Cube): Cube after applying disperser and resolution match
+        disperser_info (dict): The dictionary of the disperser used (name, R, range)
+    """
+    # Path to folder containing NIRSpec dispersion filters 
+    dispersion_dir = r"/Users/janev/Library/Group Containers/UBF8T346G9.OneDriveStandaloneSuite/OneDrive - Queen's University.noindex/OneDrive - Queen's University/MNU 2025/Dispersion Filters"
+
+
+    # Step 1: Redshift the cube --- THIS IS DONE IN THE MAIN PIPELINE OF make_narrowband_map()
+    # we assume the cube has already been redshifted at this point
+    # redshifted_cube, _ = redshift_wavelength_axis(cube, z_obs, z_sim)
+    redshifted_wave_um = redshifted_cube.wave.coord() / 1e4  # Convert to microns
+    lam_obs_min, lam_obs_max = redshifted_wave_um.min(), redshifted_wave_um.max()
+
+    # Step 2: Choose best disperser & crop the cube accordingly
+    best_disperser, cube_cropped = select_best_disperser_with_partial(redshifted_cube, lam_obs_min, lam_obs_max)
+
+    # Step 3: Load disperser data
+    dispersion_data = load_dispersion_file(best_disperser["name"], dispersion_dir)  # [:,0] = µm, [:,1] = R
+
+    # Step 4: Resample cube to disperser's wavelength axis
+    new_wave_axis_angstrom = dispersion_data[:, 0] * 1e4  # microns → Angstroms
+    resampled_cube = resample_spectral_axis(cube_cropped, new_wave_axis_angstrom)
+
+    # Step 5: Interpolate R input across new wavelength axis
+    wave_ang = resampled_cube.wave.coord()
+    wave_um = wave_ang / 1e4
+    R_vals_interp = np.interp(wave_um, dispersion_data[:, 0], dispersion_data[:, 1])
+    R_input = np.clip(R_vals_interp, 10, 10000)
+    target_R = np.median(dispersion_data[:, 1])
+
+    # Step 6: Match spectral resolution using precomputed kernel
+    blurred_cube = precomputed_match_spectral_resolution_variable_kernel(
+        resampled_cube, R_input, target_R
+    )
+
+    return blurred_cube, best_disperser
 
 
 
@@ -442,8 +468,29 @@ if __name__ == "__main__":
     file_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/cgcg453_red_mosaic.fits"
     dispersion_dir = r"/Users/janev/Library/Group Containers/UBF8T346G9.OneDriveStandaloneSuite/OneDrive - Queen's University.noindex/OneDrive - Queen's University/MNU 2025/Dispersion Filters"
 
+
     # Load the cube
     cube = Cube(file_path)
+    z_obs = 0.025
+    z_sim = 1.5
+
+    redshifted_cube, _ = redshift_wavelength_axis(cube, z_obs, z_sim)
+    blurred_cube, disperser_info = apply_dispersion_pipeline(redshifted_cube, z_obs, z_sim)
+    print(f"Disperser used: {disperser_info['name']} with R ≈ {disperser_info['R']}")
+
+        # After you write the file...
+    output_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/spectral_matched_cube_with_despersion.fits"
+    blurred_cube.write(output_path)
+
+    # Now immediately read it back in and print stats:
+    reloaded = Cube(output_path)
+    print("Reloaded cube stats:", 
+        "min=", np.nanmin(reloaded.data), 
+        "max=", np.nanmax(reloaded.data), 
+        "mean=", np.nanmean(reloaded.data))
+
+
+"""
 
     print(f"Original cube stats: min={cube.data.min()}, max={cube.data.max()}, mean={cube.data.mean()}")
     y, x = cube.shape[1] // 2, cube.shape[2] // 2
@@ -455,8 +502,7 @@ if __name__ == "__main__":
     plt.ylabel("Flux")
     plt.show()
 
-    z_obs = 0.025
-    z_sim = 2.9
+
     redshifted_cube, _ = redshift_wavelength_axis(cube, z_obs, z_sim)
     redshifted_cube_wave = redshifted_cube.wave.coord() / 1e4  # Convert to microns
 
@@ -534,11 +580,6 @@ if __name__ == "__main__":
     print("Interpolated R: min =", np.min(R_input_interpolated), "max =", np.max(R_input_interpolated))
     print("Target R:", target_R)
 
-    blurred_cube = precomputed_match_spectral_resolution_variable_kernel(
-        resampled_cube, R_input_interpolated, target_R
-    )
-
-    print("After blur: mean =", np.mean(blurred_cube.data))
 
     # Step 3: Plot comparison at central spaxel
     y, x = blurred_cube.shape[1] // 2, blurred_cube.shape[2] // 2
@@ -575,14 +616,4 @@ if __name__ == "__main__":
     check_nans_inf(cube, "Original cube")
     check_nans_inf(resampled_cube, "Resampled cube")
     check_nans_inf(blurred_cube, "Blurred cube")
-
-    # After you write the file...
-    output_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/spectral_matched_cube_with_despersion.fits"
-    blurred_cube.write(output_path)
-
-    # Now immediately read it back in and print stats:
-    reloaded = Cube(output_path)
-    print("Reloaded cube stats:", 
-        "min=", np.nanmin(reloaded.data), 
-        "max=", np.nanmax(reloaded.data), 
-        "mean=", np.nanmean(reloaded.data))
+"""

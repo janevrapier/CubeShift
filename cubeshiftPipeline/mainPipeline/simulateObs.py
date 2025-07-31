@@ -99,7 +99,7 @@ def scale_luminosity_for_redshift(cube, redshift_old, redshift_new, method="angu
     return scaled_data
 
 
-def convolve_to_match_psf(cube, fwhm_real_arcsec, fwhm_target_arcsec, z_old, z_new):
+def convolve_to_match_psf(cube, fwhm_real_arcsec, fwhm_target_arcsec, z_obs, z_sim):
     """
     Convolve cube spatially to match target PSF, accounting for redshift scaling.
 
@@ -111,9 +111,9 @@ def convolve_to_match_psf(cube, fwhm_real_arcsec, fwhm_target_arcsec, z_old, z_n
         The original PSF FWHM in arcseconds (e.g., KCWI ≈ 0.29").
     fwhm_target_arcsec : float
         The telescope's PSF you want to simulate (e.g., JWST ≈ 0.07").
-    z_old : float
+    z_obs : float
         Original redshift.
-    z_new : float
+    z_sim : float
         New redshift.
 
     Returns
@@ -123,8 +123,8 @@ def convolve_to_match_psf(cube, fwhm_real_arcsec, fwhm_target_arcsec, z_old, z_n
     """
     
     # Step 1: Scale original PSF to simulate how it would appear at high-z
-    Da_old = cosmo.angular_diameter_distance(z_old)
-    Da_new = cosmo.angular_diameter_distance(z_new)
+    Da_old = cosmo.angular_diameter_distance(z_obs)
+    Da_new = cosmo.angular_diameter_distance(z_sim)
 
     fwhm_sim = fwhm_real_arcsec * (Da_old / Da_new).value
 
@@ -168,8 +168,8 @@ def generate_mock_jwst_cube(original_cube, x_factor, y_factor, redshift_old, red
         binned_cube,
         fwhm_real_arcsec=fwhm_real_arcsec,
         fwhm_target_arcsec=fwhm_target_arcsec,
-        z_old=redshift_old,
-        z_new=redshift_new
+        z_obs=redshift_old,
+        z_sim=redshift_new
     )
 
     return convolved_cube
@@ -226,8 +226,8 @@ if __name__ == "__main__":
         binned_cube,
         fwhm_real_arcsec=fwhm_real,
         fwhm_target_arcsec=fwhm_target,
-        z_old=z1,
-        z_new=z2
+        z_obs=z1,
+        z_sim=z2
     )
 
     # Visualize PSF-convolved image

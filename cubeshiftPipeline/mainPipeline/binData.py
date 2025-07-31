@@ -6,6 +6,7 @@ from scipy.ndimage import zoom
 import matplotlib.pyplot as plt
 from reprojectBinData import reproject_cube_preserve_wcs
 from astropy.wcs import WCS as AstropyWCS 
+from cropCube import auto_crop_cube, trim_empty_edges
 
 
 def calc_proper_dist(z):
@@ -329,15 +330,15 @@ def bin_cubes_and_remove_var(x_factor_list, y_factor_list, cube_list, redshift=N
             new_filename = new_filename.split('.fits')[0] + "_novar.fits"
             binned_cube_novar.write(new_filename, savemask=False)
 
-def calculate_rebin_factors(z_old, z_new, original_pixel_scale_arcsec, desired_new_pixel_scale_arcsec=None):
+def calculate_rebin_factors(z_obs, z_sim, original_pixel_scale_arcsec, desired_new_pixel_scale_arcsec=None):
     """
     Calculate rebinning factor to match angular resolution at high redshift.
 
     Parameters
     ----------
-    z_old : float
+    z_obs : float
         Redshift of the original cube (e.g. 0.02)
-    z_new : float
+    z_sim : float
         Redshift you want to simulate (e.g. 2.0)
     original_pixel_scale_arcsec : float
         Original cube's spatial pixel scale in arcsec/pixel (e.g. 0.29")
@@ -351,8 +352,8 @@ def calculate_rebin_factors(z_old, z_new, original_pixel_scale_arcsec, desired_n
     """
 
     # Proper kpc per arcsec
-    kpc_per_arcsec_old = cosmo.kpc_proper_per_arcmin(z_old).to(u.kpc/u.arcsec)
-    kpc_per_arcsec_new = cosmo.kpc_proper_per_arcmin(z_new).to(u.kpc/u.arcsec)
+    kpc_per_arcsec_old = cosmo.kpc_proper_per_arcmin(z_obs).to(u.kpc/u.arcsec)
+    kpc_per_arcsec_new = cosmo.kpc_proper_per_arcmin(z_sim).to(u.kpc/u.arcsec)
 
     # Physical size of 1 pixel in original cube
     spaxel_size_kpc = original_pixel_scale_arcsec * u.arcsec * kpc_per_arcsec_old
@@ -371,7 +372,7 @@ def calculate_rebin_factors(z_old, z_new, original_pixel_scale_arcsec, desired_n
     return rebin_factor
 
 def calculate_spatial_resampling_factor(
-    z_old, z_new,
+    z_obs, z_sim,
     original_pixel_scale_arcsec,
     target_telescope_resolution_arcsec
 ):
@@ -381,9 +382,9 @@ def calculate_spatial_resampling_factor(
 
     Parameters
     ----------
-    z_old : float
+    z_obs : float
         Redshift of the original observation (e.g. 0.02).
-    z_new : float
+    z_sim : float
         Redshift you want to simulate (e.g. 2.0).
     original_pixel_scale_arcsec : float
         Spatial resolution of original cube (arcsec/pixel).
@@ -400,12 +401,12 @@ def calculate_spatial_resampling_factor(
         Effective spaxel size at high z in arcsec/pixel.
     """
     # Get angular diameter distances
-    Da_old = cosmo.angular_diameter_distance(z_old)
-    Da_new = cosmo.angular_diameter_distance(z_new)
+    Da_old = cosmo.angular_diameter_distance(z_obs)
+    Da_new = cosmo.angular_diameter_distance(z_sim)
 
     # Calculate how the *physical* size of a spaxel appears at new redshift
-    physical_size_kpc = original_pixel_scale_arcsec * u.arcsec * cosmo.kpc_proper_per_arcmin(z_old).to(u.kpc/u.arcsec)
-    new_spaxel_size_arcsec = (physical_size_kpc / cosmo.kpc_proper_per_arcmin(z_new).to(u.kpc/u.arcsec)).to(u.arcsec)
+    physical_size_kpc = original_pixel_scale_arcsec * u.arcsec * cosmo.kpc_proper_per_arcmin(z_obs).to(u.kpc/u.arcsec)
+    new_spaxel_size_arcsec = (physical_size_kpc / cosmo.kpc_proper_per_arcmin(z_sim).to(u.kpc/u.arcsec)).to(u.arcsec)
 
     # But telescope has a floor — we cannot get better than its resolution
     new_spaxel_size_arcsec = max(new_spaxel_size_arcsec.value, target_telescope_resolution_arcsec)
@@ -417,22 +418,22 @@ def calculate_spatial_resampling_factor(
 
 def abs_calculate_spatial_resampling_factor(pixel_scale_x, pixel_scale_y,
                                             target_pixel_scale_x, target_pixel_scale_y,
-                                            z_old, z_new):
+                                            z_obs, z_sim):
 
     """
     Return how much to spatially bin (in x and y) to match the physical size per pixel
-    that you would have if this galaxy were at z_new and observed with the new telescope.
+    that you would have if this galaxy were at z_sim and observed with the new telescope.
     """
 
     # Convert angular scales to physical sizes
-    dA_old = cosmo.angular_diameter_distance(z_old)
-    dA_new = cosmo.angular_diameter_distance(z_new)
+    dA_old = cosmo.angular_diameter_distance(z_obs)
+    dA_new = cosmo.angular_diameter_distance(z_sim)
 
     # Physical size per pixel at original redshift
     phys_size_x_kpc = (pixel_scale_x * u.arcsec).to(u.radian).value * dA_old.to(u.kpc).value
     phys_size_y_kpc = (pixel_scale_y * u.arcsec).to(u.radian).value * dA_old.to(u.kpc).value
 
-    # Desired physical pixel size at z_new (target telescope scale)
+    # Desired physical pixel size at z_sim (target telescope scale)
     target_phys_x_kpc = (target_pixel_scale_x * u.arcsec).to(u.radian).value * dA_new.to(u.kpc).value
     target_phys_y_kpc = (target_pixel_scale_y * u.arcsec).to(u.radian).value * dA_new.to(u.kpc).value
 
@@ -470,8 +471,8 @@ if __name__ == "__main__":
 
     # Angular scaling (for info)
     factor, new_pix = calculate_spatial_resampling_factor(
-        z_old=z1,
-        z_new=z2,
+        z_obs=z1,
+        z_sim=z2,
         original_pixel_scale_arcsec=orig_pixscale,
         target_telescope_resolution_arcsec=sim_telescope_resolution
     )
@@ -522,7 +523,12 @@ if __name__ == "__main__":
     else:
         print(" Resolution gets better — do NOT upsample (we skip resampling).")
         cube_resampled = cube.copy()
+    
+    cropped_resampled_cube = trim_empty_edges(cube_resampled)
 
+    output_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/binData_cube.fits"
+    cropped_resampled_cube.write(output_path)
+    print(f"Cube saved to {output_path}")
 
     # === Visualize original vs resampled (first wavelength slice) ===
     plt.figure(figsize=(12, 5))
