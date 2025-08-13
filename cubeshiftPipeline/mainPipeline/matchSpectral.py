@@ -21,7 +21,7 @@ from astropy.io import fits
 
 
 # Wavelengths in microns (μm)
-nirspec_dispersers = [
+NIRSPEC_DISPERSER_RANGES = [
     {"name": "g140m", "R": 1000, "lambda_min": 0.70, "lambda_max": 1.27},
     {"name": "g235m", "R": 1000, "lambda_min": 1.66, "lambda_max": 3.07},
     {"name": "g395m", "R": 1000, "lambda_min": 2.87, "lambda_max": 5.10},
@@ -30,6 +30,7 @@ nirspec_dispersers = [
     {"name": "g395h", "R": 2700, "lambda_min": 2.87, "lambda_max": 5.14},
     {"name": "prism", "R": 100, "lambda_min": 0.60, "lambda_max": 5.30},
 ]
+
 def crop_cube_to_wavelength_range(cube, lambda_min, lambda_max):
     """
     Crops the MPDAF cube along the spectral axis to only include wavelengths
@@ -76,7 +77,8 @@ def select_best_disperser_with_partial(cube, lam_obs_min, lam_obs_max, crop_cube
     print(f"\nObserved wavelength range: {lam_obs_min:.3f} – {lam_obs_max:.3f} μm")
     full_matches = []
 
-    for combo in nirspec_dispersers:
+    for combo in NIRSPEC_DISPERSER_RANGES:
+
         name = combo["name"]
         lambda_min = combo["lambda_min"]
         lambda_max = combo["lambda_max"]
@@ -114,7 +116,8 @@ def select_best_disperser_with_partial(cube, lam_obs_min, lam_obs_max, crop_cube
         return best_full, cube
 
     # Fallback: PRISM
-    for combo in nirspec_dispersers:
+    for combo in NIRSPEC_DISPERSER_RANGES:
+
         if combo["name"].lower() == "prism":
             print("\n No good match found. Falling back to PRISM.")
             return combo, cube
@@ -458,7 +461,7 @@ def apply_dispersion_pipeline(redshifted_cube, z_obs, z_sim):
         resampled_cube, R_input, target_R
     )
 
-    return blurred_cube, best_disperser
+    return blurred_cube, best_disperser["name"]
 
 
 
@@ -511,7 +514,8 @@ if __name__ == "__main__":
     lam_obs_max = redshifted_cube_wave.max()
 
     print(f"lam_obs_min = {lam_obs_min}, lam_obs_max = {lam_obs_max}")
-    for combo in nirspec_dispersers:
+    for combo in NIRSPEC_DISPERSER_RANGES
+:
         print(f"{combo['name']} → R={combo['R']}, λ = [{combo['lambda_min']}, {combo['lambda_max']}]")
 
     best_disperser,  cube_cropped = select_best_disperser_with_partial(redshifted_cube, lam_obs_min, lam_obs_max)

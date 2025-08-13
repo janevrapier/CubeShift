@@ -8,6 +8,52 @@ from reprojectBinData import reproject_cube_preserve_wcs
 from astropy.wcs import WCS as AstropyWCS 
 from cropCube import auto_crop_cube, trim_empty_edges
 
+class Telescope:
+    def __init__(self, name, spatial_fwhm, pixel_scale_x, pixel_scale_y, spectral_resolution,
+                 spectral_sampling=None):
+        self.name = name
+        self.spatial_fwhm = spatial_fwhm  # arcsec
+        self.pixel_scale_x = pixel_scale_x    # arcsec/pixel
+        self.pixel_scale_y = pixel_scale_y    # arcsec/pixel
+        self.spectral_resolution = spectral_resolution  # R = λ/Δλ
+        self.spectral_sampling = spectral_sampling  # Δλ in Å 
+
+# Telescope dict
+# Holds telescope OBJECTS (!)
+telescope_specs = {
+    "JWST_NIRCam": Telescope(
+        name="JWST NIRCam",
+        pixel_scale_x=0.031,  # arcsec/pixel
+        pixel_scale_y=0.063,  # arcsec/pixel
+        spatial_fwhm=0.07,    # arcsec -- simulating around F200W filter 
+        spectral_resolution=1000 # resolving power!
+    ),
+        "VLT_MUSE": Telescope(
+        name="VLT MUSE",
+        pixel_scale_x=0.2,     # arcsec/pixel
+        pixel_scale_y=0.2,
+        spatial_fwhm=0.6,      # arcsec (typical seeing-limited PSF in WFM)
+        spectral_resolution=3000,
+        spectral_sampling=1.25  # Å (typical for MUSE WFM)
+    ),
+        "JWST_NIRSpec": Telescope(
+        name="JWST NIRSpec",
+        pixel_scale_x=0.1,     # arcsec/pixel (microshutter projected size)
+        pixel_scale_y=0.1,
+        spatial_fwhm=0.07,     # arcsec — diffraction-limited like NIRCam
+        spectral_resolution=1000,  # for medium-resolution gratings (R~1000–2700)
+        spectral_sampling=2.0  # Å — approximate; varies with configuration
+    ),
+    "Keck_KCWI": Telescope(
+        name="Keck KCWI",
+        pixel_scale_x=0.29,     # arcsec/pixel (medium slicer)
+        pixel_scale_y=0.29,
+        spatial_fwhm=1.0,       # arcsec (seeing-limited, typical value)
+        spectral_resolution=4000,
+        spectral_sampling=0.5   # Å (depends on grating; ~0.5 Å for medium)
+    ),
+    
+}
 
 def calc_proper_dist(z):
     """Return angular diameter distance in parsecs at redshift z"""
@@ -443,6 +489,79 @@ def abs_calculate_spatial_resampling_factor(pixel_scale_x, pixel_scale_y,
 
     return x_factor, y_factor
 
+def resample_cube_to_telescope_and_redshift(
+    cube,
+    source_telescope,
+    target_telescope,
+    z_source,
+    z_target,
+    trim=True,
+):
+    """
+    Resample an input cube by binning it to match the spatial resolution of a target telescope
+    at a higher redshift.
+
+    Parameters
+    ----------
+    cube : mpdaf.obj.Cube
+        The input IFU cube at redshift z_source.
+    source_telescope : Telescope
+        The telescope object describing the original observation.
+    target_telescope : Telescope
+        The telescope object describing the target simulation instrument.
+    z_source : float
+        Redshift of the input cube.
+    z_target : float
+        Redshift to simulate.
+
+
+    Returns
+    -------
+    cube_resampled : mpdaf.obj.Cube
+        The resampled cube matching the target telescope resolution at z_target.
+    bin_factors : tuple(int, int)
+        The binning factors applied along x and y axes.
+    """
+
+    from astropy.cosmology import Planck18 as cosmo
+
+    # Get proper kpc per arcsec at source and target redshifts
+    kpc_per_arcsec_source = cosmo.kpc_proper_per_arcmin(z_source).to_value(u.kpc / u.arcsec)
+    kpc_per_arcsec_target = cosmo.kpc_proper_per_arcmin(z_target).to_value(u.kpc / u.arcsec)
+
+    # Calculate physical spaxel sizes
+    phys_source_x = source_telescope.pixel_scale_x * kpc_per_arcsec_source
+    phys_source_y = source_telescope.pixel_scale_y * kpc_per_arcsec_source
+    phys_target_x = target_telescope.pixel_scale_x * kpc_per_arcsec_target
+    phys_target_y = target_telescope.pixel_scale_y * kpc_per_arcsec_target
+
+    print(f"Source physical spaxel size: {phys_source_x:.3f} kpc × {phys_source_y:.3f} kpc")
+    print(f"Target physical spaxel size: {phys_target_x:.3f} kpc × {phys_target_y:.3f} kpc")
+
+    # Calculate binning factors needed
+    bin_factor_x = phys_target_x / phys_source_x
+    bin_factor_y = phys_target_y / phys_source_y
+
+    print(f"Binning factors (x, y): {bin_factor_x:.2f}, {bin_factor_y:.2f}")
+
+    # Decide if binning needed
+    if bin_factor_x > 1.0 or bin_factor_y > 1.0:
+        # Round bin factors to nearest integer
+        bin_factor_x_int = max(1, int(round(bin_factor_x)))
+        bin_factor_y_int = max(1, int(round(bin_factor_y)))
+        print(f"Applying integer binning factors: {bin_factor_x_int} × {bin_factor_y_int}")
+
+        # Bin the cube
+        cube_resampled = bin_cube(bin_factor_x_int, bin_factor_y_int, cube)
+
+        # Optionally trim edges if function provided
+        if trim:
+            cube_resampled = trim_empty_edges(cube_resampled)
+
+        return cube_resampled, (bin_factor_x_int, bin_factor_y_int)
+    else:
+        print("No binning needed; resolution improves or remains same.")
+        return cube, (1, 1)
 
 
 if __name__ == "__main__":
@@ -451,102 +570,123 @@ if __name__ == "__main__":
     from astropy.cosmology import Planck18 as cosmo
     import astropy.units as u
     import numpy as np
+    import matplotlib.pyplot as plt
 
+
+    # === Load data ===
+    print("\n=== Loading Cube ===")
     file_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/cgcg453_red_mosaic.fits"
     cube = Cube(file_path)
 
-    # Optional pre-binning
-    bin_cubes_and_remove_var(
-        x_factor_list=[2, 4],
-        y_factor_list=[2, 4],
-        cube_list=[file_path],
-        redshift=0.025
+    # === Define source and target telescopes ===
+    source_telescope = telescope_specs["Keck_KCWI"]
+    target_telescope = telescope_specs["JWST_NIRSpec"]
+
+    print(f"\nSimulating observation:")
+    print(f"  From → {source_telescope.name}")
+    print(f"  To   → {target_telescope.name}")
+
+    # === Define redshifts ===
+    z1 = 0.025  # original galaxy redshift
+    z2 = 2.5    # simulated redshift
+
+
+    cropped_resampled_cube, bin_factors = resample_cube_to_telescope_and_redshift(
+        cube=cube,
+        source_telescope=telescope_specs["Keck_KCWI"],
+        target_telescope=telescope_specs["JWST_NIRSpec"],
+        z_source=0.025,
+        z_target=2.5,
+
     )
 
-    # === Simulation setup ===
-    z1 = 0.02
-    z2 = 2.0
-    orig_pixscale = 0.29   # arcsec/pixel
-    sim_telescope_resolution = 0.031  # arcsec/pixel (e.g., JWST NIRCam native)
+    print(f"Final bin factors applied: {bin_factors}")
 
-    # Angular scaling (for info)
-    factor, new_pix = calculate_spatial_resampling_factor(
-        z_obs=z1,
-        z_sim=z2,
-        original_pixel_scale_arcsec=orig_pixscale,
-        target_telescope_resolution_arcsec=sim_telescope_resolution
-    )
-    print(f"\nAngular resampling factor: {factor:.2f}")
-    print(f"New simulated pixel size: {new_pix:.4f} arcsec")
 
-    # === Physical resolution scaling (this determines what to do) ===
-    kpc_per_arcsec_old = cosmo.kpc_proper_per_arcmin(z1).to(u.kpc/u.arcsec)
-    kpc_per_arcsec_new = cosmo.kpc_proper_per_arcmin(z2).to(u.kpc/u.arcsec)
 
-    physical_res_old = orig_pixscale * kpc_per_arcsec_old
-    physical_res_new = sim_telescope_resolution * kpc_per_arcsec_new
 
-    print(f"\nOriginal resolution: {physical_res_old:.2f}")
-    print(f"Simulated resolution at z={z2}: {physical_res_new:.2f}")
+    # # === Optional: pre-binning test ===
+    # print("\nOptional: testing binning operation (not used downstream)...")
+    # bin_cubes_and_remove_var(
+    #     x_factor_list=[2, 4],
+    #     y_factor_list=[2, 4],
+    #     cube_list=[file_path],
+    #     redshift=z1
+    # )
 
-    # Decide on resampling strategy
-    if physical_res_new > physical_res_old:
-        print(" Resolution gets worse — binning required.")
-        rebin_factor = physical_res_new / physical_res_old
-        bin_factor = int(np.round(rebin_factor.value))
-        print(f"Rebinning with factor: {bin_factor}")
+    # # === Angular scaling (info only) ===
+    # print("\n=== Angular Rescaling ===")
+    # factor, new_pix = calculate_spatial_resampling_factor(
+    #     z_obs=z1,
+    #     z_sim=z2,
+    #     original_pixel_scale_arcsec=source_telescope.pixel_scale_x,  # still OK here
+    #     target_telescope_resolution_arcsec=target_telescope.pixel_scale_x
+    # )
+    # print(f"Angular resampling factor: {factor:.2f}")
+    # print(f"New simulated pixel size: {new_pix:.4f} arcsec")
 
-        if cube._has_wcs and cube.wcs is not None:
-            # Construct the new target header with updated pixel scale
-            x_scale = orig_pixscale * bin_factor
-            y_scale = orig_pixscale * bin_factor
-            # Create new WCS with updated pixel scales
-            original_header = cube.wcs.to_header()
-            original_wcs_astropy = AstropyWCS(original_header)
-            spatial_wcs = original_wcs_astropy.sub([1, 2])
-            target_header = spatial_wcs.to_header()
+    # # === Physical Resolution Check ===
+    # print("\n=== Physical Scale Comparison ===")
 
-            target_header['CDELT1'] = -x_scale / 3600.0  # arcsec → deg
-            target_header['CDELT2'] =  y_scale / 3600.0
-            ny, nx = cube.shape[1:]
-            target_header['NAXIS1'] = nx
-            target_header['NAXIS2'] = ny
+    # # Calculate physical resolution per spaxel in both telescopes
+    # kpc_per_arcsec_old = cosmo.kpc_proper_per_arcmin(z1).to(u.kpc/u.arcsec).value
+    # kpc_per_arcsec_new = cosmo.kpc_proper_per_arcmin(z2).to(u.kpc/u.arcsec).value
 
-            target_wcs = AstropyWCS(target_header)
-            shape_out = (ny, nx)
-            cube_resampled = reproject_cube_preserve_wcs(cube, target_wcs, shape_out)
+    # orig_kpc_x = source_telescope.pixel_scale_x * kpc_per_arcsec_old
+    # orig_kpc_y = source_telescope.pixel_scale_y * kpc_per_arcsec_old
+    # new_kpc_x = target_telescope.pixel_scale_x * kpc_per_arcsec_new
+    # new_kpc_y = target_telescope.pixel_scale_y * kpc_per_arcsec_new
 
-        else:
-            print(" No valid WCS found — falling back to simple binning.")
-            cube_resampled = bin_cube(bin_factor, bin_factor, cube)
+    # print(f"KCWI spaxel size: {source_telescope.pixel_scale_x:.2f}\" × {source_telescope.pixel_scale_y:.2f}\"")
+    # print(f"  → Physical: {orig_kpc_x:.2f} × {orig_kpc_y:.2f} kpc")
 
-    else:
-        print(" Resolution gets better — do NOT upsample (we skip resampling).")
-        cube_resampled = cube.copy()
-    
-    cropped_resampled_cube = trim_empty_edges(cube_resampled)
+    # print(f"NIRSpec spaxel size: {target_telescope.pixel_scale_x:.2f}\" × {target_telescope.pixel_scale_y:.2f}\"")
+    # print(f"  → Physical: {new_kpc_x:.2f} × {new_kpc_y:.2f} kpc")
+
+    # # === Binning Strategy ===
+    # print("\n=== Binning Strategy ===")
+
+    # rebin_factor_x = new_kpc_x / orig_kpc_x
+    # rebin_factor_y = new_kpc_y / orig_kpc_y
+
+    # print(f"→ Binning factor (X): {rebin_factor_x:.2f}")
+    # print(f"→ Binning factor (Y): {rebin_factor_y:.2f}")
+
+    # if rebin_factor_x > 1.0 or rebin_factor_y > 1.0:
+    #     print("→ Binning required to match simulated resolution.")
+    #     bin_factor_x = int(np.round(rebin_factor_x))
+    #     bin_factor_y = int(np.round(rebin_factor_y))
+    #     print(f"Using integer binning: {bin_factor_x} × {bin_factor_y}")
+    #     cube_resampled = bin_cube(bin_factor_x, bin_factor_y, cube)
+    # else:
+    #     print("→ No binning required. Resolution improves or stays the same.")
+    #     cube_resampled = cube.copy()
+
+    # # === Trim and save result ===
+    # print("\n=== Trimming and Saving Cube ===")
+    # cropped_resampled_cube = trim_empty_edges(cube_resampled)
 
     output_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/binData_cube.fits"
     cropped_resampled_cube.write(output_path)
-    print(f"Cube saved to {output_path}")
+    print(f"✔ Resampled cube saved to: {output_path}")
 
-    # === Visualize original vs resampled (first wavelength slice) ===
+    # === Visualize original vs resampled ===
+    print("\n=== Displaying First Slice of Cube ===")
     plt.figure(figsize=(12, 5))
 
     plt.subplot(1, 2, 1)
-    plt.title("Original Cube (z ≈ 0.02)")
+    plt.title(f"Original Cube ({source_telescope.name})")
     plt.imshow(cube.data[0], origin='lower', cmap='viridis')
     plt.colorbar(label='Flux')
     plt.xlabel("X pixel")
     plt.ylabel("Y pixel")
 
     plt.subplot(1, 2, 2)
-    plt.title(f"Simulated Cube at z={z2}")
-    plt.imshow(cube_resampled.data[0], origin='lower', cmap='viridis')
+    plt.title(f"Simulated at z={z2} ({target_telescope.name})")
+    plt.imshow(cropped_resampled_cube.data[0], origin='lower', cmap='viridis')
     plt.colorbar(label='Flux')
     plt.xlabel("X pixel")
     plt.ylabel("Y pixel")
 
     plt.tight_layout()
     plt.show()
-

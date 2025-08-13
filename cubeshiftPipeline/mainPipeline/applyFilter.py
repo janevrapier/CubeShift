@@ -73,6 +73,23 @@ def select_nirspec_mode(lambda_obs_micron):
     return None
 
 
+def select_best_nirspec_filter(lambda_obs_micron):
+    """
+    Select the NIRSpec filter mode that covers the observed wavelength
+    and has the smallest bandwidth (finest resolution).
+    """
+    candidates = []
+    for mode, (lam_min, lam_max) in NIRSPEC_THROUGHPUT_RANGES.items():
+        if lam_min <= lambda_obs_micron <= lam_max:
+            bandwidth = lam_max - lam_min
+            candidates.append((mode, bandwidth))
+
+    if not candidates:
+        return None
+
+    # Sort by bandwidth ascending and pick the smallest
+    candidates.sort(key=lambda x: x[1])
+    return candidates[0][0]
 
 
 def apply_nirspec_throughput(cube, z, line_rest_wavelength, filter_dir):
@@ -86,53 +103,42 @@ def apply_nirspec_throughput(cube, z, line_rest_wavelength, filter_dir):
         filter_dir: path to directory containing *_trans.fits files
 
     Returns:
-        MPDAF Cube after throughput correction.
+        MPDAF Cube after throughput correction,
+        cube wavelength array (µm),
+        interpolated throughput array,
+        chosen filter filename.
     """
     lambda_obs = (line_rest_wavelength * (1 + z)) / 1e4  # Convert to microns
     print(f"Observed wavelength: {lambda_obs:.3f} µm at z = {z}")
 
-    # Load all *_trans.fits files in directory
-    filters = {}
-    for fname in os.listdir(filter_dir):
-        if fname.endswith("_trans.fits"):
-            path = os.path.join(filter_dir, fname)
-            with fits.open(path) as hdul:
-                wave = hdul[1].data['WAVELENGTH']  # µm
-                trans = hdul[1].data['THROUGHPUT']
-                filters[fname] = (wave, trans)
-    # debug
-    print(f"Filter wavelength range: {wave.min():.3f} - {wave.max():.3f} µm")
+    chosen_mode = select_best_nirspec_filter(lambda_obs)
+    if chosen_mode is None:
+        raise ValueError(f"No NIRSpec filter mode covers λ = {lambda_obs:.3f} µm")
 
+    print(f"Chosen filter mode with smallest bandwidth: {chosen_mode}")
 
-    # Find all filters that cover lambda_obs
-    candidates = []
-    for fname, (wave, trans) in filters.items():
-        if wave.min() <= lambda_obs <= wave.max():
-            candidates.append((fname, wave, trans))
+    filter_filename = f"jwst_nirspec_{chosen_mode}_trans.fits"
+    filter_path = os.path.join(filter_dir, filter_filename)
+    if not os.path.exists(filter_path):
+        raise FileNotFoundError(f"Transmission filter file not found: {filter_path}")
 
-    if not candidates:
-        raise ValueError(f"No transmission filter covers λ = {lambda_obs:.3f} µm at z = {z}")
+    with fits.open(filter_path) as hdul:
+        wave_file = hdul[1].data['WAVELENGTH']  # µm
+        trans_file = hdul[1].data['THROUGHPUT']
 
-    # Sort by coverage or priority if needed — currently just use the first match
-    fname, wave, trans = candidates[0]
-    print(f"Applying filter: {fname} (covers {wave.min():.2f}–{wave.max():.2f} µm)")
+    print(f"Applying filter: {filter_filename} (covers {wave_file.min():.2f}–{wave_file.max():.2f} µm)")
 
-    # Interpolate transmission at cube wavelengths
-    if cube.wave is None:
-        raise ValueError("Cube has no spectral axis (cube.wave is None)")
+    cube_waves_um = cube.wave.coord() / 1e4  # Convert cube wavelengths to µm
+    interp = interp1d(wave_file, trans_file, bounds_error=False, fill_value=0.0)
+    throughput_interp = interp(cube_waves_um)
 
-    cube_waves_um = cube.wave.coord() / 1e4  # Cube wavelengths in µm
-    interp = interp1d(wave, trans, bounds_error=False, fill_value=0.0)
-    throughput = interp(cube_waves_um)
+    print(f"Throughput range after interpolation: min={throughput_interp.min()}, max={throughput_interp.max()}")
 
-    print(f"Throughput range: min={throughput.min()}, max={throughput.max()}")
+    # Apply throughput correction
+    cube.data *= throughput_interp[:, np.newaxis, np.newaxis]
 
-    # Apply to cube
-    cube.data *= throughput[:, np.newaxis, np.newaxis]
-    print(f"Cube wavelength range: {cube.wave.coord().min()/1e4:.3f} – {cube.wave.coord().max()/1e4:.3f} µm")
+    return cube, cube_waves_um, throughput_interp, filter_filename, chosen_mode
 
-
-    return cube, wave, trans
 
 def plot_results(filtered_cube):
     # test that filter is valid
@@ -188,51 +194,49 @@ def plot_results(filtered_cube):
 
 def apply_transmission_filter(cube, z, line_rest_wavelength):
     """
-    Applies the appropriate transmission filter and returns cube + filter name.
+    Applies the appropriate NIRSpec transmission filter to the cube.
+
+    Returns:
+        filtered_cube : mpdaf.obj.Cube
+            The cube after throughput correction.
+        filter_name : str
+            The short filter name, e.g., 'f070lp'.
     """
-    # path to NIRSpec transmission filters:
-    filter_dir = r"/Users/janev/Library/Group Containers/UBF8T346G9.OneDriveStandaloneSuite/OneDrive - Queen's University.noindex/OneDrive - Queen's University/MNU 2025/Transmission Filters"
-    print(f"Cube type: {type(cube)}")
-    print(f"Wave object: {cube.wave}")
+    filter_dir = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/Transmission Filters"
 
-    filtered_cube, wave, throughput = apply_nirspec_throughput(cube, z, line_rest_wavelength, filter_dir)
-    
-    # Extract name from filename (e.g., jwst_nirspec_f070lp_trans.fits → f070lp)
-    filter_name = "unknown"
-    for fname in os.listdir(filter_dir):
-        if fname.endswith("_trans.fits"):
-            wl, thr = load_filter_transmission(os.path.join(filter_dir, fname))
-            if np.allclose(wl, wave) and np.allclose(thr, throughput):
-                filter_name = fname.split("_")[2]  # 'f070lp' from 'jwst_nirspec_f070lp_trans.fits'
-                break
+    # Apply the throughput
+    filtered_cube, wave, throughput, filter_filename, chosen_mode = apply_nirspec_throughput(
+        cube, z, line_rest_wavelength, filter_dir
+    )
 
-    return filtered_cube, filter_name
+    # chosen_filter is expected to be something like 'f070lp'
+    filter_path = os.path.join(filter_dir, filter_filename)
+
+    if not os.path.exists(filter_path):
+        raise FileNotFoundError(f"Transmission filter file not found: {filter_path}")
+
+    return filtered_cube, chosen_mode
 
 if __name__ == "__main__":
     file_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/cgcg453_red_mosaic.fits"
     cube = Cube(file_path)
 
-    # Set the galaxy redshift and emission line rest wavelength
     z_obs = 0.025
     z_sim = 1.5
     rest_line = 5007  # [OIII]
 
-
     redshifted_cube, _ = redshift_wavelength_axis(cube, z_obs, z_sim)
-    # Your local transmission filter path (note the raw string for safety with spaces)
-    filter_dir = r"/Users/janev/Library/Group Containers/UBF8T346G9.OneDriveStandaloneSuite/OneDrive - Queen's University.noindex/OneDrive - Queen's University/MNU 2025/Transmission Filters"
+
+    filter_dir = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/Transmission Filters"
     cube_waves = cube.wave.coord() / 1e4  # in microns
     print(f"Cube wavelength range: {cube_waves.min():.3f} - {cube_waves.max():.3f} µm")
 
-    # Apply throughput correction
-    filtered_cube, wave_filter, thr_filter = apply_nirspec_throughput(redshifted_cube, z_sim, rest_line, filter_dir)
-    
+    # Apply throughput correction and unpack
+    filtered_cube, wave_filter, trans, filter_filename, chosen_mode = apply_nirspec_throughput(redshifted_cube, z_sim, rest_line, filter_dir)
 
-    # Plot 
-    plot_throughput_and_spectrum(filtered_cube, wave_filter, thr_filter, x=30, y=96)
+    # Use the correct variables here:
+    plot_throughput_and_spectrum(filtered_cube, wave_filter, trans, x=30, y=96)
 
-    # Test 
     plot_results(filtered_cube)
 
-    # Save output cube
     filtered_cube.write("/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/filtered_cube_with_throughput.fits")

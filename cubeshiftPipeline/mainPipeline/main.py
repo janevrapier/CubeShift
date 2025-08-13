@@ -4,7 +4,7 @@ from astropy import units as u
 import matplotlib.pyplot as plt
 from matchSpectral import precomputed_match_spectral_resolution_variable_kernel, resample_spectral_axis, apply_dispersion_pipeline
 from zWavelengths import redshift_wavelength_axis
-from binData import bin_cube, calculate_spatial_resampling_factor, abs_calculate_spatial_resampling_factor
+from binData import resample_cube_to_telescope_and_redshift, bin_cube, calculate_spatial_resampling_factor, abs_calculate_spatial_resampling_factor
 from simulateObs import scale_luminosity_for_redshift, convolve_to_match_psf
 from reprojectBinData import reproject_cube_preserve_wcs
 import numpy as np
@@ -17,7 +17,7 @@ from mpdaf.obj import Image, plot_rgb
 from astropy.wcs.utils import proj_plane_pixel_scales
 from matplotlib_scalebar.scalebar import ScaleBar
 from matplotlib.patches import Patch
-
+from hBetaHgammaRatio import plot_hbeta_hgamma_ratio, plot_hbeta_hgamma_ratio_amp, plot_hbeta_hgamma_ratio_amp_soft
 
 
 
@@ -52,17 +52,29 @@ telescope_specs = {
         spectral_resolution=3000,
         spectral_sampling=1.25  # Å (typical for MUSE WFM)
     ),
-    # Add NIRSpec 
-    # Add other telescopes
+        "JWST_NIRSpec": Telescope(
+        name="JWST NIRSpec",
+        pixel_scale_x=0.1,     # arcsec/pixel (microshutter projected size)
+        pixel_scale_y=0.1,
+        spatial_fwhm=0.07,     # arcsec — diffraction-limited like NIRCam
+        spectral_resolution=1000,  # for medium-resolution gratings (R~1000–2700)
+        spectral_sampling=2.0  # Å — approximate; varies with configuration
+    ),
+    "Keck_KCWI": Telescope(
+        name="Keck KCWI",
+        pixel_scale_x=0.29,     # arcsec/pixel (medium slicer)
+        pixel_scale_y=0.29,
+        spatial_fwhm=1.0,       # arcsec (seeing-limited, typical value)
+        spectral_resolution=4000,
+        spectral_sampling=0.5   # Å (depends on grating; ~0.5 Å for medium)
+    ),
+    
 }
-
 
 
 # Pipeline:
 
-
-
-def simulate_observation(cube, telescope_name, z_obs, z_sim):
+def simulate_observation(cube, telescope_name, z_obs, z_sim, source_telescope, target_telescope):
     """
     Simulates how a cube would appear if observed with a different telescope at a different redshift.
     Pipeline:
@@ -71,7 +83,7 @@ def simulate_observation(cube, telescope_name, z_obs, z_sim):
         3. Scale luminosity for redshift effects
         4. Convolve spatially to match PSF
         5. Match spectral resolution (convolve in lambda)
-        6. Match spatial sampling (reproject to new pixel grid)
+        6. Match spatial sampling (reproject to new pixel grid) - REMOVED
         7. Match spectral sampling (resample lambda axis)
 
     Parameters
@@ -88,6 +100,7 @@ def simulate_observation(cube, telescope_name, z_obs, z_sim):
     cube_sim : mpdaf.obj.Cube
         The transformed cube simulating the target telescope's observation.
     """
+    z = z_sim # for file naming 
 
     telescope = telescope_specs[telescope_name]
 
@@ -104,70 +117,41 @@ def simulate_observation(cube, telescope_name, z_obs, z_sim):
 
 
     # STEP 2: Rebin spatially to match physical resolution
-    x_factor, y_factor = abs_calculate_spatial_resampling_factor(
-        pixel_scale_x=cube.wcs.get_axis_increments(unit=u.arcsec)[0],
-        pixel_scale_y=cube.wcs.get_axis_increments(unit=u.arcsec)[1],
-        target_pixel_scale_x=telescope.pixel_scale_x,
-        target_pixel_scale_y=telescope.pixel_scale_y,
-        z_obs=z_obs,
-        z_sim=z_sim
+    cube_resampled, bin_factors = resample_cube_to_telescope_and_redshift(
+        transmission_cube,
+        source_telescope,
+        target_telescope,
+        z_obs,
+        z_sim 
     )
 
-
-    # Round and validate
-    if x_factor < 1 or y_factor < 1:
-        print("Skipping binning (factors < 1); relying on reprojection instead.")
-        rebinned_cube = redshifted_cube
-    else:
-        rebinned_cube = bin_cube(
-            x_factor=int(np.round(x_factor)),
-            y_factor=int(np.round(y_factor)),
-            data_cube=redshifted_cube,
-            method='sum'
-        )
-
-    print(f"Cube shape: {redshifted_cube.shape}  (z, y, x)")
-    print(f"x_factor: {x_factor}, y_factor: {y_factor}")
+    print(f"Final bin factors applied: {bin_factors}")
+    output_path = f"/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/Output_cubes/z_{z}_rebinned.fits"
+    cube_resampled.write(output_path)
+    print(f"✔ Rebinned cube saved to: {output_path}")
 
 
     # STEP 3: Scale luminosity to account for angular size and flux dimming
-    scaled_data = scale_luminosity_for_redshift(rebinned_cube, z_obs, z_sim, method='both')
-    rebinned_cube.data = scaled_data
+    scaled_data = scale_luminosity_for_redshift(cube_resampled, z_obs, z_sim, method='both')
+    cube_resampled.data = scaled_data
 
     # STEP 4: Convolve spatially to match target PSF
     cube_psf = convolve_to_match_psf(
-        rebinned_cube,
+        cube_resampled,
         fwhm_real_arcsec=cube.wcs.get_axis_increments(unit=u.arcsec)[0],
         fwhm_target_arcsec=telescope.spatial_fwhm,
         z_obs=z_obs,
         z_sim=z_sim
     )
+    output_path = f"/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/Output_cubes/z_{z}_{trans_filter_name}_psf.fits"
+    cube_psf.write(output_path)
+    print(f"✔ PSF convolved cube saved to: {output_path}")
 
     # STEP 5: Apply dispersion filter and spectral resolution matching
 
     blurred_cube, best_disperser = apply_dispersion_pipeline(cube_psf, z_obs, z_sim)
 
-    # this is the step that gives a really weird result 
-
-    # STEP 6: Reproject spatially to match target pixel scale
-    # original_header = cube.wcs.to_header()
-    # original_wcs_astropy = AstropyWCS(original_header)
-
-    # # Extract spatial 2D WCS
-    # spatial_wcs = original_wcs_astropy.sub([1, 2])
-    # target_header = spatial_wcs.to_header()
-    # target_header['CDELT1'] = -telescope.pixel_scale_x / 3600.0
-    # target_header['CDELT2'] = telescope.pixel_scale_y / 3600.0
-
-    # ny, nx = cube.shape[1:]  # Spatial shape
-    # target_header['NAXIS1'] = nx
-    # target_header['NAXIS2'] = ny
-
-    # target_spatial_wcs_astropy = AstropyWCS(target_header)
-    # shape_out = (ny, nx)
-
-    # cube = reproject_cube_preserve_wcs(cube, target_spatial_wcs_astropy, shape_out)
-    
+    # Removed unecessary reproject step and fixed binning 
 
     # Step 7 
     telescope = telescope_specs[telescope_name]  # e.g., "JWST_NIRCam"
@@ -182,26 +166,33 @@ def simulate_observation(cube, telescope_name, z_obs, z_sim):
     new_wave_axis = np.arange(start, end + bin_width, bin_width)
     cube = resample_spectral_axis(blurred_cube, new_wave_axis)
 
+    output_path = f"/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/Output_cubes/z_{z}_{trans_filter_name}_{best_disperser}_lsf.fits"
+    cube.write(output_path)
+    print(f"✔ LSF spectral resolution matched cube saved to: {output_path}")
+
     return cube, trans_filter_name, best_disperser
 
-
 def test_JWST_full_pipeline():
-    file_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/cgcg453_red_mosaic.fits"
+    file_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/Output_cubes/cgcg453_red_mosaic.fits"
     cube = Cube(file_path)
 
     z_obs = 0.025  # Original observed redshift
-    z_sim = 2.5
+    z_sim = 2.5 # Simulated redshift
 
-    simulated_cube, trans_filter_name, disp_filter = simulate_observation(cube, "JWST_NIRCam", z_obs, z_sim)
+    source_telescope = telescope_specs["Keck_KCWI"]
+    target_telescope = telescope_specs["JWST_NIRSpec"]
+
+
+    simulated_cube, trans_filter_name, disp_filter = simulate_observation(cube, "JWST_NIRSpec", z_obs, z_sim, source_telescope, target_telescope)
     disp_filter_name = disp_filter["name"]
-    output_path = f"/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/final_simulated_cube_{z_sim}.fits"
+    output_path = f"/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/Output_cubes/final_simulated_cube_{z_sim}.fits"
     simulated_cube.write(output_path)
     print(f"Transmission filter used: {trans_filter_name}")
     print(f"Dispersion filter used: {disp_filter_name}")
     print(f" Simulated FITS cube saved to: {output_path}")
 
-
 def test_MUSE_FOV():
+
     file_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/cgcg453_red_mosaic.fits"
     cube = Cube(file_path)
 
@@ -245,16 +236,12 @@ def test_MUSE_FOV():
 
     print(f" Saved redshifted, reprojected, cropped cube to:\n{output_path}")
 
-
-
-
-def extract_centered_flux_map(
-    cube,
+def extract_centered_flux_map(cube,
     line_rest,
     z,
     broad_width=30,  # Angstroms for finding peak
     narrow_width=10  # Angstroms for final integration
-):
+    ):
     """
     Extracts a flux map centered on the brightest emission region of a spectral line.
     
@@ -315,124 +302,217 @@ def extract_centered_flux_map(
 
     return flux_map
 
-def extract_centered_flux_map_with_z(cube, line_rest, z_obs, z, width_narrow_rest=20, width_broad_rest=40):
-    """
-    Extracts a flux map by integrating over a redshifted emission line using a difference-of-Gaussians approach.
-    """
-    # apply same vmin and vmax to all of them (from first slice)
-    print(f"\nExtracting flux map for z = {z}...")
 
-    # Redshift line center and widths
+
+def extract_centered_flux_map_with_z(
+    cube, line_rest, z_obs, z,
+    width_narrow_rest=20, width_broad_rest=40,
+    return_metadata=False, mask_flux=False, center=False, cutout_size=40
+):
+    """
+    Extracts a flux map by integrating over a redshifted emission line using a
+    difference-of-Gaussians approach.
+    """
+
+    print(f"\n[DEBUG] Extracting flux map for z = {z:.3f}...")
+
     line_obs = line_rest * (1 + z)
-    width_narrow_obs = width_narrow_rest * (1 + z) # 20 angstroms covers the OIII emisson line
+    width_narrow_obs = width_narrow_rest * (1 + z)
     width_broad_obs = width_broad_rest * (1 + z)
-    
-    print(f"Observed line center: {line_obs:.1f} Å")
-    print(f"Observed widths: narrow = {width_narrow_obs:.1f} Å, broad = {width_broad_obs:.1f} Å")
 
-    # Get wavelength axis
-    lam = cube.wave.coord()  # angstroms
+    print(f"[DEBUG] line_obs = {line_obs:.2f} Å")
+    print(f"[DEBUG] narrow = {width_narrow_obs:.2f} Å, broad = {width_broad_obs:.2f} Å")
 
-    # Create masks for narrow and broad integration ranges
-    mask_narrow = np.abs(lam - line_obs) <= (width_narrow_obs / 2)
-    mask_broad = np.abs(lam - line_obs) <= (width_broad_obs / 2)
+    lam = cube.wave.coord()
+    print(f"[DEBUG] cube wavelength range: {lam[0]:.1f} - {lam[-1]:.1f} Å")
 
-    print(f"Spectral channels in narrow mask: {mask_narrow.sum()}")
-    print(f"Spectral channels in broad mask: {mask_broad.sum()}")
+    # [MODIFIED] Step 1: Define a broader window ±20 Å to find max flux
+    broad_search_mask = np.abs(lam - line_obs) <= 20
+    cube_segment = cube.data[broad_search_mask, :, :]
+
+    # [MODIFIED] Step 2: Collapse across spatial dimensions and find λ of max flux
+    flux_spectrum = cube_segment.sum(axis=(1, 2))  # sum over x and y
+    max_index = np.argmax(flux_spectrum)
+    wavelength_max = lam[broad_search_mask][max_index]
+    print(f"[DEBUG] wavelength_max (centered on flux peak): {wavelength_max:.2f} Å")
+
+    # [MODIFIED] Step 3: Create new masks centered on wavelength_max
+    mask_narrow = np.abs(lam - wavelength_max) <= (width_narrow_obs / 2)
+    mask_broad = np.abs(lam - wavelength_max) <= (width_broad_obs / 2)
+
+    print(f"[DEBUG] narrow mask sum: {mask_narrow.sum()} channels")
+    print(f"[DEBUG] broad mask sum: {mask_broad.sum()} channels")
+
+    lam_narrow = lam[mask_narrow]
+    lam_broad = lam[mask_broad]
+    print(lam_narrow)
+    print(lam_broad)
 
     if mask_narrow.sum() == 0 or mask_broad.sum() == 0:
-        print("Warning: No channels found in mask — returning empty flux map.")
-        return np.zeros(cube.shape[1:])  # (ny, nx)
+        print("⚠️ Warning: No channels found in mask. Returning empty flux map.")
+        if return_metadata:
+            return z, np.zeros(cube.shape[1:])
+        else:
+            return np.zeros(cube.shape[1:])
 
-    # Extract subcubes and integrate
-    subcube_narrow = cube.data[mask_narrow, :, :]
-    subcube_broad = cube.data[mask_broad, :, :]
+    flux_narrow = cube.data[mask_narrow, :, :].sum(axis=0)
+    flux_broad = cube.data[mask_broad, :, :].sum(axis=0)
 
-    flux_map_narrow = np.nansum(subcube_narrow, axis=0)
-    flux_map_broad = np.nansum(subcube_broad, axis=0)
+    print(f"[DEBUG] flux_narrow stats: min={np.nanmin(flux_narrow):.3g}, max={np.nanmax(flux_narrow):.3g}")
+    print(f"[DEBUG] flux_broad stats: min={np.nanmin(flux_broad):.3g}, max={np.nanmax(flux_broad):.3g}")
 
-    # Flux = narrow band - broad band (DoG-style background subtraction)
-    flux_map = flux_map_narrow - flux_map_broad
+    flux_map = 2 * flux_narrow - flux_broad
 
-    return flux_map
-
-
-def plot_flux_map_for_z(ax, cube, z, z_obs, line_rest, fig,
-                        trans_filter_name=None, disp_filter_name=None):
-    """Plot a [O III] flux map on the given axis."""
-    flux_map = extract_centered_flux_map_with_z(cube, line_rest, z_obs, z)
-
-    im = ax.imshow(flux_map, origin='lower', cmap='inferno')
+    print(f"[DEBUG] flux_map stats before masking: min={np.nanmin(flux_map):.3g}, max={np.nanmax(flux_map):.3g}")
     
-    if z == z_obs:
-        title = f"[O III] Flux Map for KCWI z = {z}"
-    elif trans_filter_name and disp_filter_name:
-        title = f"[O III] z={z}\n{trans_filter_name}, {disp_filter_name}"
-    else:
-        title = f"[O III] z={z}"
+    if center:
+        y_peak, x_peak = np.unravel_index(np.nanargmax(flux_map), flux_map.shape)
 
-    ax.set_title(title)
-    ax.set_xlabel("X (pix)")
-    ax.set_ylabel("Y (pix)")
-    fig.colorbar(im, ax=ax, label='Flux')
+        y_half = min(cutout_size // 2, y_peak, flux_map.shape[0] - y_peak - 1)
+        x_half = min(cutout_size // 2, x_peak, flux_map.shape[1] - x_peak - 1)
 
-    return flux_map
+        y_min = y_peak - y_half
+        y_max = y_peak + y_half + 1
+        x_min = x_peak - x_half
+        x_max = x_peak + x_half + 1
 
+        flux_map = flux_map[y_min:y_max, x_min:x_max]
 
+    print(f"[DEBUG] Flux map shape after cutout: {flux_map.shape}")
 
-def plot_rgb_map_for_z(ax, cube, z):
-    """Extract RGB images and plot on the given axis."""
-    rgb_imgs = extract_rgb_images_from_cube(
-        cube, z,
-        rest_waves=(4861, 5007, 4500), # Hβ 4861Å, [O III] 5007Å, Stellar Continuum ~4500Å
-        width=20
-    )
-    plot_rgb_from_images(ax, rgb_imgs)
-    ax.set_title(f"RGB z={z}")
-    return rgb_imgs
+    if mask_flux:
+        flux_map[flux_map <= 0] = np.nan
+
+    return (z, flux_map) if return_metadata else flux_map
 
 
-def extract_rgb_images_from_cube(cube, z, rest_waves, width=20):
+def plot_flux_map_for_z(ax, flux_map, z, z_ref=0.025, logscale=False,
+                        vmin=None, vmax=None, scale_factor=1.0):
+
     """
-    Create MPDAF Images for R, G, B channels by slicing the cube around observed-frame wavelengths.
+    Plot a flux map on a given axis.
 
     Parameters
     ----------
-    cube : mpdaf.obj.Cube
-        The spectral cube (already redshifted).
+    ax : matplotlib axis
+        Axis to plot on.
+    flux_map : np.ndarray or MPDAF image
+        2D flux map to plot.
     z : float
-        Observed redshift.
-    rest_waves : tuple
-        Tuple of three rest-frame wavelengths (blue, green, red), e.g., (4861, 5007, 6563).
-    width : float
-        Width of the band in angstroms, in rest frame. Will be redshifted accordingly.
-
-    Returns
-    -------
-    Tuple of three mpdaf.obj.Image objects for R, G, B
+        Redshift of the cube (for title only).
+    z_ref : float
+        Reference redshift to which SB dimming is normalized.
+    logscale : bool
+        If True, show log10(flux) instead of linear flux.
+    vmin, vmax : float
+        Intensity range for colormap.
     """
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    # --- Fix D: work on a copy to avoid modifying original ---
+    flux = flux_map.copy()
+
+    # --- Handle log scaling (early masking) ---
+    if logscale:
+        flux_map = np.where(flux_map > 1e-12, flux_map, np.nan)  # 1e-12 floor to avoid log(very tiny) = -inf
+
+        with np.errstate(divide='ignore', invalid='ignore'):
+            flux = np.log10(flux)
+            flux[~np.isfinite(flux)] = np.nan  # sanitize bad values
+
+    # --- Fix A & B: Compute vmin/vmax only on final flux array ---
+    if vmin is None or vmax is None:
+        finite_flux = flux[np.isfinite(flux)]
+        if finite_flux.size == 0:
+            vmin, vmax = (0.0, 1.0) if not logscale else (-16, -12)
+        else:
+            # Optional: Use slightly different stretch for the reference redshift
+            if z == z_ref:
+                vmin = np.nanpercentile(finite_flux, 5)
+                vmax = np.nanpercentile(finite_flux, 99)
+            else:
+                vmin = np.nanpercentile(finite_flux, 5)
+                vmax = np.nanpercentile(finite_flux, 99)
+
+    # --- Fix C: Apply colormap safely ---
+    im = ax.imshow(flux, origin="lower", cmap="plasma", vmin=vmin, vmax=vmax)
+
+    # --- Dynamically adjust the colorbar label based on scale_factor ---
+    try:
+        scale_exponent = int(np.log10(scale_factor))
+    except (ValueError, TypeError):
+        scale_exponent = 0
+
+    # Unit string adjusts 1e-16 base by scale_factor
+    base_exponent = -16 + scale_exponent
+    unit_prefix = rf"$10^{{{base_exponent}}}$"
+    unit_label = rf"Flux [{unit_prefix} erg s$^{{-1}}$ cm$^{{-2}}$ $\AA^{{-1}}$]"
+    log_label = r"log$_{10}$ " + unit_label
+
+    # Add colorbar with adjusted label
+    plt.colorbar(im, ax=ax, label=log_label if logscale else unit_label)
+    ax.set_title(f"z = {z:.2f}")
+    ax.axis('off')
+    return im
+
+
+
+def plot_rgb_map_for_z(ax, cube, z, z_obs, rest_waves, vmin=None, vmax=None):
+    """Extract RGB images and plot on the given axis."""
+    rgb_images = extract_rgb_images_from_cube(cube, z, rest_waves, width=20)
+    plot_rgb_from_images(ax, rgb_images, vmin=vmin, vmax=vmax, z=z, z_obs=z_obs)
+    ax.set_title(f"RGB z={z}")
+    return rgb_images
+
+
+
+def extract_rgb_images_from_cube(cube, z, rest_waves, width=20, variable_widths=False, widths=None):
+    """
+    Create MPDAF Images for R, G, B channels by slicing the cube around observed-frame wavelengths.
+    """
+    print(f"DEBUG: Incoming rest_waves = {rest_waves}")
+    print(f"DEBUG: z = {z}")
+
     obs_waves = [(1 + z) * lam for lam in rest_waves]
-    obs_widths = [(1 + z) * width for _ in rest_waves]
+    if variable_widths:
+        obs_widths = [(1 + z) * w for w in widths]
+    else:
+        obs_widths = [(1 + z) * width for _ in rest_waves]
 
     images = []
-    for lam, dw in zip(obs_waves, obs_widths):
-        img = cube.get_image((lam - dw/2, lam + dw/2))
+    for i, (lam, dw) in enumerate(zip(obs_waves, obs_widths)):
+        wave_min = cube.wave.coord()[0]
+        wave_max = cube.wave.coord()[-1]
 
+        # Print debug info only for blue channel (index 0)
+        if i == 0:  # blue channel is the first in rest_waves list
+            print(f"Blue channel extraction window for z={z}: {lam - dw/2:.1f} - {lam + dw/2:.1f} Å")
+            print(f"Cube wavelength coverage: {wave_min:.1f} - {wave_max:.1f} Å")
+            if lam - dw/2 < wave_min or lam + dw/2 > wave_max:
+                print("Warning: Blue channel extraction range is outside cube wavelength range!")
+
+        img = cube.get_image((lam - dw / 2, lam + dw / 2))
         images.append(img)
-    return images  # [B, G, R] order expected
+    print(f"1.25x DEBUG: rest_waves in: {rest_waves}")
+    print(f"1.25x DEBUG: z={z}, applying obs_waves = rest_waves * (1+z)")
+
+    return images  # [B, G, R]
 
 
-def plot_rgb(images, vmin=None, vmax=None, ax=None, use_wcs=False, **kwargs):
+def plot_rgb(images, vmin=None, vmax=None, ax=None, use_wcs=False, log_scale=False, **kwargs):
     """Generate an RGB image from 3 MPDAF Image objects and plot it."""
     if ax is None:
         import matplotlib.pyplot as plt
         fig, ax = plt.subplots()
 
-    # Get image data, and replace NaNs with 0
-    b, g, r = [np.nan_to_num(im.data) for im in images]
+    b, g, r = [np.nan_to_num(im.data, nan=0.0, posinf=0.0, neginf=0.0) for im in images]
 
-    # Normalize based on vmin and vmax
-    # Double check this 
+    if log_scale:
+        b = np.log10(b + 1e-5)
+        g = np.log10(g + 1e-5)
+        r = np.log10(r + 1e-5)
+
     def norm(data, vmin, vmax):
         return np.clip((data - vmin) / (vmax - vmin + 1e-10), 0, 1)
 
@@ -442,38 +522,41 @@ def plot_rgb(images, vmin=None, vmax=None, ax=None, use_wcs=False, **kwargs):
 
     rgb = np.dstack((r_img, g_img, b_img))
 
-    if use_wcs:
-        ax.imshow(rgb, origin='lower', **kwargs)
-    else:
-        ax.imshow(rgb, origin='lower', **kwargs)
-
+    ax.imshow(rgb, origin='lower', **kwargs)
     ax.set_xticks([])
     ax.set_yticks([])
 
     return ax, rgb
 
-def plot_rgb_from_images(ax, images, vmin=None, vmax=None, **kwargs):
-    """Plot RGB image using given MPDAF Images (B, G, R order)."""
-    # Use this ONCE to get vmin and vmax from the first RGB image set
-    vmin, vmax = None, None
-    fig, axes = plt.subplots(2, 2, figsize=(10, 10), subplot_kw={'projection': cube.wcs})
-    for i, images in enumerate(rgb_image_list):  # assuming you have 4 sets of images
-        ax = axes.flat[i]
-        if i == 0:
-            # Compute from first image set
-            b_back, _ = images[0].background()
-            g_back, _ = images[1].background()
-            r_back, _ = images[2].background()
-            b_max = images[0].data.max()
-            g_max = images[1].data.max()
-            r_max = images[2].data.max()
-            vmin = (b_back, g_back, r_back)
-            vmax = (b_max, g_max, r_max)
-        
-        plot_rgb_from_images(ax, images, vmin=vmin, vmax=vmax)
+
+def plot_rgb_from_images(ax, rgb_images, vmin=None, vmax=None, z=None, z_obs=None, **kwargs):
+    """
+    Plot RGB image using given MPDAF Images (B, G, R order).
+    You can specify vmin and vmax directly or let it compute from images.
+    If z == z_obs, use custom vmin and vmax based on percentile.
+    Otherwise, also use percentile-based scaling to brighten simulated cubes.
+    """
+    b, g, r = rgb_images
+
+    if z is not None and z_obs is not None and z == z_obs:
+        # Original image: percentile-based scaling
+        vmin = (0.0, 0.0, 0.0)
+        vmax = (
+            np.percentile(b.data[~np.isnan(b.data)], 90.0),
+            np.percentile(g.data[~np.isnan(g.data)], 90.0),
+            np.percentile(r.data[~np.isnan(r.data)], 90.0),
+        )
+    else:
+        # Simulated cubes: also use percentile-based scaling (otherwise sim images are all black)
+        vmin = (0.0, 0.0, 0.0)
+        vmax = (
+            np.percentile(b.data[~np.isnan(b.data)], 99.0),
+            np.percentile(g.data[~np.isnan(g.data)], 99.0),
+            np.percentile(r.data[~np.isnan(r.data)], 99.0),
+        )
 
     ax, _ = plot_rgb(
-        images,
+        rgb_images,
         vmin=vmin,
         vmax=vmax,
         ax=ax,
@@ -486,144 +569,234 @@ def plot_rgb_from_images(ax, images, vmin=None, vmax=None, **kwargs):
 
 
 
-def plot_hbeta_hgamma_ratio(cube, z=0.0, ax=None, hbeta_width=20, hgamma_width=20):
-    """
-    Plot the map of Hβ / Hγ ratio from a data cube into the given axis.
+def get_global_vmin_vmax(all_rgb_images, lower=0.5, upper=99.5):
+    """Compute global vmin/vmax for each RGB channel across all images."""
+    stacked = list(zip(*all_rgb_images))  # [(R1, R2, ...), (G1, G2, ...), (B1, B2, ...)]
+    vmin = tuple(np.percentile(np.concatenate([im.data.ravel() for im in band]), lower) for band in stacked)
+    vmax = tuple(np.percentile(np.concatenate([im.data.ravel() for im in band]), upper) for band in stacked)
+    return vmin, vmax
 
-    Parameters:
-    - cube: mpdaf.obj.Cube instance
-    - z: redshift of the source
-    - ax: matplotlib axis to plot into
-    - hbeta_width: Width (Å) around Hβ line for integration
-    - hgamma_width: Width (Å) around Hγ line for integration
-    """
-
-    # Rest-frame line centers in Angstroms
-    HBETA_REST = 4861.0
-    HGAMMA_REST = 4341.0
-
-    # Convert to observed wavelengths
-    hbeta_obs = HBETA_REST * (1 + z)
-    hgamma_obs = HGAMMA_REST * (1 + z)
-
-    # Extract flux maps by integrating around the emission lines
-    hbeta_map = cube.get_image(wave=(hbeta_obs - hbeta_width/2, hbeta_obs + hbeta_width/2))
-    hgamma_map = cube.get_image(wave=(hgamma_obs - hgamma_width/2, hgamma_obs + hgamma_width/2))
-
-    # Mask division warnings and invalid ratios
-    with np.errstate(divide='ignore', invalid='ignore'):
-        ratio_data = hbeta_map.data / hgamma_map.data
-        ratio_mask = np.logical_or(hbeta_map.mask, hgamma_map.mask)
-        ratio_data[ratio_mask] = np.nan
-
-    # Plot into the given axis
-    im = ax.imshow(ratio_data, origin='lower', cmap='plasma', vmin=0, vmax=4)
-    ax.set_title(f"Hβ / Hγ at z={z}", fontsize=10)
-    ax.set_xticks([])
-    ax.set_yticks([])
-
-    return im  # for colorbar
+def get_fluxmap_vmin_vmax(all_flux_maps, lower=0.5, upper=99.5):
+    flux_data = [flux.ravel() for (_, flux) in all_flux_maps if flux is not None]
+    flat_data = np.concatenate(flux_data)
+    vmin = np.percentile(flat_data, lower)
+    vmax = np.percentile(flat_data, upper)
+    return vmin, vmax
 
 
+if __name__ == "__main__":
 
-# === Load original KCWI cube ===
+    # === Load original KCWI cube ===
 
-file_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/cgcg453_red_mosaic.fits"
-cube = Cube(file_path) 
-print(type(cube))
+    file_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/cgcg453_red_mosaic.fits"
+    cube = Cube(file_path) 
+    print(type(cube))
 
-z_obs = 0.025  # Observed redshift of the real galaxy
+    z_obs = 0.025  # Observed redshift of the real galaxy
+    all_rgb_images = []  # Will hold tuples: (R, G, B)
 
-# === Target redshifts for simulation ===
-redshifts = [z_obs, 2.5, 3.0, 4.0]
-telescope = "JWST_NIRCam"  
+    # === Target redshifts for simulation ===
+    redshifts = [z_obs, 2.5, 3.0, 4.0]
+    telescope = "JWST_NIRSpec"  
+    source_telescope=telescope_specs["Keck_KCWI"]
+    target_telescope=telescope_specs["JWST_NIRSpec"]
+    oiii_rest = 5007
+    rest_waves=(4861, 5007, 4500) # Hβ 4861Å, [O III] 5007Å, Stellar Continuum ~4500Å
 
-# === [OIII] 5007 in rest-frame ===
-oiii_rest = 5007  # Angstrom
+    # Set up flux map figure
+    fig_flux, axes_flux = plt.subplots(2, 2, figsize=(12, 10))
+    axes_flux = axes_flux.flatten()
+    # Set up RGB map figure
+    fig_rgb, axes_rgb = plt.subplots(2, 2, figsize=(12, 10))
+    axes_rgb = axes_rgb.flatten()
+    # Set up Hbeta/Hgamma ratio figure 
+    fig_ratio, axes_ratio = plt.subplots(2, 2, figsize=(12, 10))
+    axes_ratio = axes_ratio.flatten()
 
-# Set up flux map figure
-fig_flux, axes_flux = plt.subplots(2, 2, figsize=(12, 10))
-axes_flux = axes_flux.flatten()
-# Set up RGB map figure
-fig_rgb, axes_rgb = plt.subplots(2, 2, figsize=(12, 10))
-axes_rgb = axes_rgb.flatten()
-# Set up Hbeta/Hgamma ratio figure 
-fig_ratio, axes_ratio = plt.subplots(2, 2, figsize=(12, 10))
-axes_ratio = axes_ratio.flatten()
+    # --- First Pass: extract image data only ---
+    all_rgb_images = []
+    all_flux_maps = []
+    filter_info_per_z = {}
+    simulated_cubes = {}
 
-
-for i, z in enumerate(redshifts):
-    ax_flux = axes_flux[i]
-    ax_rgb = axes_rgb[i]
-    ax_ratio = axes_ratio[i]
-
-    if z == z_obs:
-        cube_z = cube
-        im = plot_hbeta_hgamma_ratio(cube_z, z, ax=ax_ratio)
-
-        flux_map = extract_centered_flux_map_with_z(cube, oiii_rest, z_obs, z)
-        plot_flux_map_for_z(ax_flux, cube_z, z, z_obs, oiii_rest, fig_flux)
+    # Store original and simulated flux maps separately for custom vmin/vmax
+    original_flux_map = None
+    simulated_flux_maps = []
 
 
-        plot_rgb_map_for_z(ax_rgb, cube_z, z)
+    for z in redshifts:
+        print(f"Calling extract_centered_flux_map_with_z with return_metadata=True at z = {z}")
 
-    else:
+        if z == z_obs:
+            cube_z = cube
+            trans_filter_name = "original"
+            disp_filter_name = "original"
+
+            cube_z_unscaled = cube_z.copy()
+            simulated_cubes[z] = cube_z_unscaled  # Save clean, unmodified cube
+            cube_z_vis = cube_z_unscaled  # No brightening for original
+
+
+            cube_z_vis = cube_z_unscaled.copy()
+            # cube_z_vis.data *= 1e5
+
+            simulated_cubes[z] = {
+                "unscaled": cube_z_unscaled,
+                "vis": cube_z_vis
+            }
+
+        else:
+            try:
+                cube_z, trans_filter_name, disp_filter = simulate_observation(
+                    cube, telescope, z_obs, z, source_telescope, target_telescope
+                )
+                disp_filter_name = disp_filter["name"] if isinstance(disp_filter, dict) else str(disp_filter)
+
+                cube_z_unscaled = cube_z.copy()
+                simulated_cubes[z] = cube_z_unscaled
+
+                cube_z_vis = cube_z_unscaled.copy()
+                # cube_z_vis.data *= 1e7
+
+
+                simulated_cubes[z] = {
+                    "unscaled": cube_z_unscaled,
+                    "vis": cube_z_vis
+                }
+
+            except Exception as e:
+                print(f"Skipping z={z} in first pass due to error: {e}")
+                continue
+
         try:
-            cube_z, trans_filter_name, disp_filter = simulate_observation(
-                cube, telescope, z_obs, z
-            )
-            disp_filter_name = disp_filter["name"]
+            rgb_images = extract_rgb_images_from_cube(cube_z_vis, z, rest_waves, width=20)
+            print(f"--- RGB Stats for z={z} ---")
+            for band, name in zip(rgb_images, ['R', 'G', 'B']):
+                print(f"{name} min={np.nanmin(band.data):.3e}, max={np.nanmax(band.data):.3e}")
+            all_rgb_images.append(rgb_images)
 
-            im = plot_hbeta_hgamma_ratio(cube_z, z, ax=ax_ratio)
+            # Save filter names for second pass
+            filter_info_per_z[z] = (trans_filter_name, disp_filter_name)
 
-            plot_flux_map_for_z(
-                ax_flux, cube_z, z, z_obs, oiii_rest, fig_flux,
-                trans_filter_name=trans_filter_name,
-                disp_filter_name=disp_filter_name
+            # Use the unscaled (redshifted) version stored earlier
+            cube_for_flux = simulated_cubes[z]["unscaled"].copy()
+            if z != z_obs:
+                cube_for_flux.data *= 1e2
+            print(f"[DEBUG] Using cube with wavelength range: {cube_for_flux.wave.coord()[0]:.1f}–{cube_for_flux.wave.coord()[-1]:.1f} Å")
+
+            z_flux, flux_map = extract_centered_flux_map_with_z(
+                cube_for_flux, oiii_rest, z_obs, z, return_metadata=True
             )
-            plot_rgb_map_for_z(ax_rgb, cube_z, z)
+
+            all_flux_maps.append((z, flux_map))  # still keep for convenient lookup
+
+            # Save original and simulated separately for independent vmin/vmax
+            if z == z_obs:
+                original_flux_map = (z, flux_map)
+            else:
+                simulated_flux_maps.append((z, flux_map))
+
 
         except Exception as e:
-            print(f"Error at z={z}: {e}")
+            print(f"Skipping z={z} due to error: {e}")
+            continue
+
+
+    #  RGB vmin/vmax calculation
+    vmin_shared, vmax_shared = get_global_vmin_vmax(all_rgb_images)
+    # Flux map vmin/vmax calculation 
+
+    vmin_flux_orig, vmax_flux_orig = get_fluxmap_vmin_vmax([original_flux_map])
+    vmin_flux_sim, vmax_flux_sim = get_fluxmap_vmin_vmax(simulated_flux_maps)
+
+
+    #print(f"[INFO] Global vmin_flux = {vmin_flux:.2e}, vmax_flux = {vmax_flux:.2e}")
+    # --- Second Pass: plot maps using saved cubes ---
+    for i, z in enumerate(redshifts):
+        ax_flux = axes_flux[i]
+        ax_rgb = axes_rgb[i]
+        ax_ratio = axes_ratio[i]
+
+        try:
+            cube_z = simulated_cubes[z]["unscaled"]
+            cube_z_vis = simulated_cubes[z]["vis"]
+            trans_filter_name, disp_filter_name = filter_info_per_z.get(z, ("unknown", "unknown"))
+
+            # --- Plot Hβ / Hγ ratio map ---
+            print("====== [INFO] Hβ / Hγ ratio map ====== ")
+            im = plot_hbeta_hgamma_ratio_amp_soft(cube_z, z, ax=ax_ratio, sn_threshold=0)
+
+            # --- Get precomputed flux map ---
+            flux_map = dict(all_flux_maps)[z]
+
+            # --- Print diagnostics to understand why map appear yellow ---
+            print(f"[{z}] Flux map stats: min={np.nanmin(flux_map):.3e}, max={np.nanmax(flux_map):.3e}")
+            #print(f"[{z}] Using vmin_flux={vmin_flux:.3e}, vmax_flux={vmax_flux:.3e}")
+
+
+            # --- Plot flux map using shared color scale ---
+            print(f"[{z}] Flux map shape: {flux_map.shape}, min = {np.nanmin(flux_map)}, max = {np.nanmax(flux_map)}")
+            # Choose vmin/vmax depending on whether it's the original or simulated
+            if z == z_obs:
+                vmin_plot, vmax_plot = vmin_flux_orig, vmax_flux_orig
+            else:
+                vmin_plot, vmax_plot = vmin_flux_sim, vmax_flux_sim
+
+            print(f"[{z}] Plotting flux map with vmin={vmin_plot:.2e}, vmax={vmax_plot:.2e}")
+            plot_flux_map_for_z(
+                ax_flux, flux_map, z, logscale=False,
+                vmin=vmin_plot, vmax=vmax_plot,
+                scale_factor=1e2 if z != z_obs else 1.0
+            )
+
+            # --- Plot RGB map using same vmin/vmax across all panels ---
+
+            plot_rgb_map_for_z(
+                ax_rgb, cube_z_vis, z, z_obs, rest_waves,
+                vmin=vmin_shared, vmax=vmax_shared
+            )
+
+        except Exception as e:
+            print(f"[{z}] Error plotting: {e}")
             ax_flux.set_visible(False)
             ax_rgb.set_visible(False)
             ax_ratio.set_visible(False)
 
 
-# Final display steps
-# Why are none of the titles showing up??
-fig_flux.suptitle("[O III] Flux Maps at Various Redshifts", fontsize=16)
+    # Final display steps
 
-fig_flux.tight_layout()
-fig_flux.subplots_adjust(top=0.92)
+    fig_flux.suptitle("[O III] Flux Maps at Various Redshifts", fontsize=16)
 
-fig_rgb.suptitle("RGB Maps at Various Redshifts", fontsize=16)
+    fig_flux.tight_layout()
+    fig_flux.subplots_adjust(top=0.92)
 
-fig_rgb.tight_layout()
-fig_rgb.subplots_adjust(top=0.92, bottom=0.1)
+    fig_rgb.suptitle("RGB Maps at Various Redshifts", fontsize=16)
 
-legend_elements = [
-    Patch(facecolor='red', label='Hβ 4861 (Red)'),
-    Patch(facecolor='green', label='[O III] 5007 (Green)'),
-    Patch(facecolor='blue', label='Stellar continuum ~4500 Å (Blue)')
-]
+    fig_rgb.tight_layout()
+    fig_rgb.subplots_adjust(top=0.92, bottom=0.1)
 
-# Add legend to the overall figure (fig_rgb), not to a specific subplot
-fig_rgb.legend(
-    handles=legend_elements,
-    loc='lower center',
-    ncol=3,
-    fontsize=12,
-    frameon=False,
-    bbox_to_anchor=(0.5, 0.05)
-)
-fig_ratio.suptitle("Hβ / Hγ Line Ratio Maps at Various Redshifts", fontsize=16)
-fig_ratio.tight_layout()
-fig_ratio.subplots_adjust(top=0.92)
+    legend_elements = [
+        Patch(facecolor='red', label='Hβ 4861 (Red)'),
+        Patch(facecolor='green', label='[O III] 5007 (Green)'),
+        Patch(facecolor='blue', label='Stellar continuum ~4500 Å (Blue)')
+    ]
 
-# Optional: Add a shared colorbar
-cbar_ax = fig_ratio.add_axes([0.92, 0.15, 0.02, 0.7])  # [left, bottom, width, height]
-fig_ratio.colorbar(im, cax=cbar_ax, label=r'H$\beta$ / H$\gamma$')
+    # Add legend to the overall figure (fig_rgb), not to a specific subplot
+    fig_rgb.legend(
+        handles=legend_elements,
+        loc='lower center',
+        ncol=3,
+        fontsize=12,
+        frameon=False,
+        bbox_to_anchor=(0.5, 0.05)
+    )
+    fig_ratio.suptitle("Hβ / Hγ Line Ratio Maps at Various Redshifts", fontsize=16)
+    fig_ratio.tight_layout()
+    fig_ratio.subplots_adjust(top=0.92)
+
+    # Optional: Add a shared colorbar
+    cbar_ax = fig_ratio.add_axes([0.92, 0.15, 0.02, 0.7])  # [left, bottom, width, height]
+    fig_ratio.colorbar(im, cax=cbar_ax, label=r'H$\beta$ / H$\gamma$')
 
 
-plt.show()
+    plt.show()
