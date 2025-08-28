@@ -18,7 +18,9 @@ from astropy.wcs.utils import proj_plane_pixel_scales
 from matplotlib_scalebar.scalebar import ScaleBar
 from matplotlib.patches import Patch
 from hBetaHgammaRatio import plot_hbeta_hgamma_ratio, plot_hbeta_hgamma_ratio_amp, plot_hbeta_hgamma_ratio_amp_soft
-
+from astropy.io import fits
+from ioTools import read_in_data
+from oldVersions import old_redshift_wavelength_axis
 
 
 # Get rid of provisional numbers from tests and use telescope dictionary instead
@@ -74,7 +76,7 @@ telescope_specs = {
 
 # Pipeline:
 
-def simulate_observation(cube, telescope_name, z_obs, z_sim, source_telescope, target_telescope):
+def simulate_observation(cube_file_name, telescope_name, z_obs, z_sim, source_telescope, target_telescope, galaxy_name=None):
     """
     Simulates how a cube would appear if observed with a different telescope at a different redshift.
     Pipeline:
@@ -101,15 +103,14 @@ def simulate_observation(cube, telescope_name, z_obs, z_sim, source_telescope, t
         The transformed cube simulating the target telescope's observation.
     """
     z = z_sim # for file naming 
-
     telescope = telescope_specs[telescope_name]
 
     print(f"Simulating observation as seen by {telescope.name} at z = {z_sim}")
 
     # STEP 1: Redshift wavelength axis
-    redshifted_cube, lam_new = redshift_wavelength_axis(cube, z_obs, z_sim)
+    redshifted_cube, lam_new = redshift_wavelength_axis(cube_file_name, z_obs, z_sim)
     print("WCS after redshifting:", redshifted_cube.wcs)
-
+    print("Cube shape:", redshifted_cube.data.shape)
 
     # STEP 2: Apply transmission filter 
     line_rest_wavelength = 5007 # For [OIII], change this for other emission lines!!!!
@@ -127,23 +128,27 @@ def simulate_observation(cube, telescope_name, z_obs, z_sim, source_telescope, t
 
     print(f"Final bin factors applied: {bin_factors}")
     output_path = f"/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/Output_cubes/z_{z}_rebinned.fits"
+    if galaxy_name is not None:
+        output_path = f"/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/Output_cubes/{galaxy_name}/{galaxy_name}_z_{z}_rebinned.fits"
     cube_resampled.write(output_path)
     print(f"✔ Rebinned cube saved to: {output_path}")
 
 
     # STEP 3: Scale luminosity to account for angular size and flux dimming
-    scaled_data = scale_luminosity_for_redshift(cube_resampled, z_obs, z_sim, method='both')
+    scaled_data, dx_arcsec, dy_arcsec = scale_luminosity_for_redshift(cube_resampled, z_obs, z_sim, method='both')
     cube_resampled.data = scaled_data
 
     # STEP 4: Convolve spatially to match target PSF
     cube_psf = convolve_to_match_psf(
         cube_resampled,
-        fwhm_real_arcsec=cube.wcs.get_axis_increments(unit=u.arcsec)[0],
+        dx_arcsec, dy_arcsec,
         fwhm_target_arcsec=telescope.spatial_fwhm,
         z_obs=z_obs,
         z_sim=z_sim
     )
     output_path = f"/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/Output_cubes/z_{z}_{trans_filter_name}_psf.fits"
+    if galaxy_name is not None:
+        output_path = f"/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/Output_cubes/{galaxy_name}/{galaxy_name}_z_{z}_{trans_filter_name}_psf.fits"
     cube_psf.write(output_path)
     print(f"✔ PSF convolved cube saved to: {output_path}")
 
@@ -167,29 +172,25 @@ def simulate_observation(cube, telescope_name, z_obs, z_sim, source_telescope, t
     cube = resample_spectral_axis(blurred_cube, new_wave_axis)
 
     output_path = f"/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/Output_cubes/z_{z}_{trans_filter_name}_{best_disperser}_lsf.fits"
+    if galaxy_name is not None:
+        output_path = f"/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/Output_cubes/{galaxy_name}/{galaxy_name}_z_{z}_{trans_filter_name}_{best_disperser}_lsf.fits"
     cube.write(output_path)
     print(f"✔ LSF spectral resolution matched cube saved to: {output_path}")
 
     return cube, trans_filter_name, best_disperser
 
-def test_JWST_full_pipeline():
-    file_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/Output_cubes/cgcg453_red_mosaic.fits"
-    cube = Cube(file_path)
+def test_Keck_to_JWST_full_pipeline(file_path, z_obs, z_sim, galaxy_name):
+    
 
-    z_obs = 0.025  # Original observed redshift
-    z_sim = 2.5 # Simulated redshift
 
     source_telescope = telescope_specs["Keck_KCWI"]
     target_telescope = telescope_specs["JWST_NIRSpec"]
 
 
-    simulated_cube, trans_filter_name, disp_filter = simulate_observation(cube, "JWST_NIRSpec", z_obs, z_sim, source_telescope, target_telescope)
-    disp_filter_name = disp_filter["name"]
-    output_path = f"/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/Output_cubes/final_simulated_cube_{z_sim}.fits"
-    simulated_cube.write(output_path)
+    simulated_cube, trans_filter_name, disp_filter_name = simulate_observation(file_path, "JWST_NIRSpec", z_obs, z_sim, source_telescope, target_telescope, galaxy_name = galaxy_name)
     print(f"Transmission filter used: {trans_filter_name}")
     print(f"Dispersion filter used: {disp_filter_name}")
-    print(f" Simulated FITS cube saved to: {output_path}")
+    print(f"Done!")
 
 def test_MUSE_FOV():
 
@@ -302,13 +303,11 @@ def extract_centered_flux_map(cube,
 
     return flux_map
 
-
-
 def extract_centered_flux_map_with_z(
     cube, line_rest, z_obs, z,
     width_narrow_rest=20, width_broad_rest=40,
     return_metadata=False, mask_flux=False, center=False, cutout_size=40
-):
+    ):
     """
     Extracts a flux map by integrating over a redshifted emission line using a
     difference-of-Gaussians approach.
@@ -385,7 +384,6 @@ def extract_centered_flux_map_with_z(
 
     return (z, flux_map) if return_metadata else flux_map
 
-
 def plot_flux_map_for_z(ax, flux_map, z, z_ref=0.025, logscale=False,
                         vmin=None, vmax=None, scale_factor=1.0):
 
@@ -456,16 +454,12 @@ def plot_flux_map_for_z(ax, flux_map, z, z_ref=0.025, logscale=False,
     ax.axis('off')
     return im
 
-
-
 def plot_rgb_map_for_z(ax, cube, z, z_obs, rest_waves, vmin=None, vmax=None):
     """Extract RGB images and plot on the given axis."""
     rgb_images = extract_rgb_images_from_cube(cube, z, rest_waves, width=20)
     plot_rgb_from_images(ax, rgb_images, vmin=vmin, vmax=vmax, z=z, z_obs=z_obs)
     ax.set_title(f"RGB z={z}")
     return rgb_images
-
-
 
 def extract_rgb_images_from_cube(cube, z, rest_waves, width=20, variable_widths=False, widths=None):
     """
@@ -499,7 +493,6 @@ def extract_rgb_images_from_cube(cube, z, rest_waves, width=20, variable_widths=
 
     return images  # [B, G, R]
 
-
 def plot_rgb(images, vmin=None, vmax=None, ax=None, use_wcs=False, log_scale=False, **kwargs):
     """Generate an RGB image from 3 MPDAF Image objects and plot it."""
     if ax is None:
@@ -527,7 +520,6 @@ def plot_rgb(images, vmin=None, vmax=None, ax=None, use_wcs=False, log_scale=Fal
     ax.set_yticks([])
 
     return ax, rgb
-
 
 def plot_rgb_from_images(ax, rgb_images, vmin=None, vmax=None, z=None, z_obs=None, **kwargs):
     """
@@ -566,9 +558,6 @@ def plot_rgb_from_images(ax, rgb_images, vmin=None, vmax=None, z=None, z_obs=Non
 
     return ax
 
-
-
-
 def get_global_vmin_vmax(all_rgb_images, lower=0.5, upper=99.5):
     """Compute global vmin/vmax for each RGB channel across all images."""
     stacked = list(zip(*all_rgb_images))  # [(R1, R2, ...), (G1, G2, ...), (B1, B2, ...)]
@@ -583,14 +572,7 @@ def get_fluxmap_vmin_vmax(all_flux_maps, lower=0.5, upper=99.5):
     vmax = np.percentile(flat_data, upper)
     return vmin, vmax
 
-
-if __name__ == "__main__":
-
-    # === Load original KCWI cube ===
-
-    file_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/cgcg453_red_mosaic.fits"
-    cube = Cube(file_path) 
-    print(type(cube))
+def make_big_maps():
 
     z_obs = 0.025  # Observed redshift of the real galaxy
     all_rgb_images = []  # Will hold tuples: (R, G, B)
@@ -800,3 +782,33 @@ if __name__ == "__main__":
 
 
     plt.show()
+
+if __name__ == "__main__":
+
+    #  run pipeline 
+
+    galaxy_name = "CGCG453"
+    file_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/cgcg453_red_mosaic.fits"
+    z_obs = 0.025  # Original observed redshift
+    z_sim = 3 # Simulated redshift
+
+    # galaxy_name = "UGC10099"
+    # file_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/UGC10099/J155636_red_mosaic.fits"
+    # z_obs = 0.035 # from NED: 0.034713 (heliocentric)
+    # z_sim = 3
+
+    # galaxy_name = "IRAS08"
+    # file_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/IRAS08/IRAS08_combined_final_metacube.fits"
+    # z_obs = 0.019 
+    # z_sim = 3
+    
+    # galaxy_name = "TEST"
+    # file_path = test_cube = f"/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/Output_cubes/gauss_test_cube.fits"
+    # z_obs = 0.01
+    # z_sim = 0.5
+    
+    test_Keck_to_JWST_full_pipeline(file_path, z_obs, z_sim, galaxy_name)
+    
+
+    
+ 

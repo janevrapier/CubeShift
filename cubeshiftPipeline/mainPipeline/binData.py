@@ -497,6 +497,8 @@ def resample_cube_to_telescope_and_redshift(
     z_target,
     trim=True,
 ):
+
+# use abs_calculate_spatial_resampling_factor !!!! (shrink factor)
     """
     Resample an input cube by binning it to match the spatial resolution of a target telescope
     at a higher redshift.
@@ -528,6 +530,8 @@ def resample_cube_to_telescope_and_redshift(
     # Get proper kpc per arcsec at source and target redshifts
     kpc_per_arcsec_source = cosmo.kpc_proper_per_arcmin(z_source).to_value(u.kpc / u.arcsec)
     kpc_per_arcsec_target = cosmo.kpc_proper_per_arcmin(z_target).to_value(u.kpc / u.arcsec)
+    print(f"kpc per arcsec {kpc_per_arcsec_target}")
+    print(f"kpc per arcsec {kpc_per_arcsec_source}")
 
     # Calculate physical spaxel sizes
     phys_source_x = source_telescope.pixel_scale_x * kpc_per_arcsec_source
@@ -575,7 +579,7 @@ if __name__ == "__main__":
 
     # === Load data ===
     print("\n=== Loading Cube ===")
-    file_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/cgcg453_red_mosaic.fits"
+    file_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/Output_cubes/test_z_0.5_redshifted.fits"
     cube = Cube(file_path)
 
     # === Define source and target telescopes ===
@@ -587,16 +591,16 @@ if __name__ == "__main__":
     print(f"  To   → {target_telescope.name}")
 
     # === Define redshifts ===
-    z1 = 0.025  # original galaxy redshift
-    z2 = 2.5    # simulated redshift
+    z1 = 0.01  # original galaxy redshift
+    z2 = 0.5    # simulated redshift
 
 
     cropped_resampled_cube, bin_factors = resample_cube_to_telescope_and_redshift(
         cube=cube,
         source_telescope=telescope_specs["Keck_KCWI"],
         target_telescope=telescope_specs["JWST_NIRSpec"],
-        z_source=0.025,
-        z_target=2.5,
+        z_source=0.01,
+        z_target=0.5,
 
     )
 
