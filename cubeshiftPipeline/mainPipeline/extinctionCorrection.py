@@ -1,5 +1,4 @@
 from zWavelengths import redshift_wavelength_axis
-from mpdaf.obj import Cube
 import matplotlib.pyplot as plt
 import numpy as np
 from astropy.io import fits
@@ -11,105 +10,13 @@ from dustmaps.sfd import SFDQuery
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
-import numpy as np
 import io, re
+
+from mpdaf.obj import Cube, WaveCoord, WCS as MPDAF_WCS
+
 
 NED_EXTINCT_URL = "https://ned.ipac.caltech.edu/cgi-bin/nph-calc_extinct"
 
-def fetch_ned_extinction_table(ra, dec, timeout=30):
-    """
-    Query NED extinction calculator and return a DataFrame with columns:
-      'band' (str), 'wavelength_um' (float), 'A_lambda_mag' (float)
-    ra/dec may be strings (hh:mm:ss, ±dd:mm:ss) or floats (degrees).
-    """
-
-    params = {
-        "in_csys": "Equatorial",
-        "in_equinox": "J2000.0",
-        "obs_epoch": "2000.0",
-        "lon": ra_deg,
-        "lat": dec_deg,
-        "pa": "0.0",
-        "out_csys": "Equatorial",
-        "out_equinox": "J2000.0"
-    }
-
-    r = requests.get(NED_EXTINCT_URL, params=params, timeout=timeout,
-                     headers={"User-Agent":"python-requests (astro pipeline)"})
-    r.raise_for_status()
-    html = r.text
-
-    # Parse HTML and look for the table that contains Band / lamEff / A(lam)
-    soup = BeautifulSoup(html, "lxml")
-
-    # find the table which has headers that include "Band" and "lamEff" or "A(lambda)"
-    candidate_tables = soup.find_all("table")
-    df = None
-    for table in candidate_tables:
-        headers = [th.get_text(strip=True) for th in table.find_all("th")]
-        hdr_text = " ".join(headers).lower()
-        if ("band" in hdr_text and ("lameff" in hdr_text or "a(lam)" in hdr_text or "a(lambda)" in hdr_text)):
-            # parse rows
-            rows = []
-            for tr in table.find_all("tr"):
-                tds = [td.get_text(" ", strip=True) for td in tr.find_all("td")]
-                if not tds:
-                    continue
-                # Typical NED table columns (observed layout can vary):
-                # index | Band | lamEff (um) | A(lam) | Reference
-                # so we expect len(tds) >= 4
-                if len(tds) >= 4:
-                    band = tds[1].strip()
-                    # try to parse wavelength and A(lam)
-                    try:
-                        lam_eff = float(re.sub(r'[^\d\.Ee+-]', '', tds[2]))
-                    except Exception:
-                        lam_eff = np.nan
-                    try:
-                        a_lam = float(re.sub(r'[^\d\.Ee+-]', '', tds[3]))
-                    except Exception:
-                        a_lam = np.nan
-                    rows.append((band, lam_eff, a_lam))
-            if rows:
-                df = pd.DataFrame(rows, columns=["band", "wavelength_um", "A_lambda_mag"])
-                # drop rows where wavelength is nan
-                df = df.dropna(subset=["wavelength_um", "A_lambda_mag"])
-                break
-
-    # Fallback: if BS4 parsing failed, try to parse the ASCII text that can also be present
-    if df is None:
-        lines = html.splitlines()
-        # try to find the start of the table by header keywords
-        start = None
-        for i, L in enumerate(lines):
-            if re.search(r'\bBand\b', L) and re.search(r'lam', L, re.I):
-                start = i
-                break
-        if start is None:
-            raise RuntimeError("Couldn't find extinction table in NED response; page layout may have changed.")
-        text_table = "\n".join(lines[start:])
-        # Use pandas to read whitespace-delimited table (best-effort)
-        try:
-            df_raw = pd.read_csv(io.StringIO(text_table), delim_whitespace=True, comment="#", engine="python")
-            # try to find columns for band, wavelength and A(lam)
-            # this is heuristic; inspect df_raw columns
-            cols = [c.lower() for c in df_raw.columns]
-            band_col = next((c for c in df_raw.columns if 'band' in c.lower()), None)
-            lam_col = next((c for c in df_raw.columns if 'lam' in c.lower() and 'eff' in c.lower()), None)
-            A_col = next((c for c in df_raw.columns if 'a(' in c.lower() or 'a_lam' in c.lower() or 'a(lambda)' in c.lower()), None)
-            if band_col and lam_col and A_col:
-                df = df_raw[[band_col, lam_col, A_col]].copy()
-                df.columns = ["band", "wavelength_um", "A_lambda_mag"]
-            else:
-                raise RuntimeError("Fallback text parsing couldn't locate expected columns.")
-        except Exception as e:
-            raise RuntimeError("Failed to parse NED extinction output: " + str(e))
-
-    # ensure numeric types and units: NED gives lamEff in microns already
-    df["wavelength_um"] = pd.to_numeric(df["wavelength_um"], errors="coerce")
-    df["A_lambda_mag"] = pd.to_numeric(df["A_lambda_mag"], errors="coerce")
-    df = df.dropna(subset=["wavelength_um", "A_lambda_mag"]).reset_index(drop=True)
-    return df
 
 
 def get_A_lambda_at_wavelength(ra, dec, wavelength_um):
@@ -190,7 +97,129 @@ def milky_way_extinction_correction(lamdas, data, Av=0.2511, undo=False):
         data = (10**(0.4*A_lam[:, None, None])) * data  # correct extinction
 
     print(f" Extinction correction applied with Av of {Av} undo = {undo}")
-    return data
+    return data, A_lam
+
+
+
+
+def milky_way_extinction_correction_cube(
+    filename, Av=0.2511, undo=False,
+    output_filename=None, return_a_lam=False
+):
+    """
+    Apply Milky Way extinction correction (Cardelli et al. 1989) to an MPDAF Cube.
+
+    Parameters
+    ----------
+    filename : str
+        Path to FITS cube file.
+    Av : float
+        Milky Way extinction (mag).
+    undo : bool
+        If True, undo the extinction correction instead of applying it.
+    output_filename : str, optional
+        If provided, save the corrected cube here.
+
+    Returns
+    -------
+    Cube
+        Extinction-corrected MPDAF Cube with WCS and header preserved.
+    """
+    import numpy as np
+    from mpdaf.obj import Cube
+
+    # Load full cube with WCS + headers intact
+    cube = Cube(filename)
+
+    # Wavelength axis in Angstroms
+    lam = cube.wave.coord()
+    lam_microns = lam / 10000.0
+    y = lam_microns**(-1) - 1.82
+
+    # Cardelli extinction law
+    a_x = (1.0 + 0.17699*y - 0.50447*(y**2) - 0.02427*(y**3) +
+           0.72085*(y**4) + 0.01979*(y**5) - 0.77530*(y**6) +
+           0.32999*(y**7))
+    b_x = (1.41338*y + 2.28305*(y**2) + 1.07233*(y**3) -
+           5.38434*(y**4) - 0.62251*(y**5) + 5.30260*(y**6) -
+           2.09002*(y**7))
+    Rv = 3.1
+    A_lam = (a_x + b_x/Rv) * Av
+
+    # Apply correction along spectral axis
+    if undo:
+        corrected_data = cube.data / (10**(0.4 * A_lam[:, None, None]))
+    else:
+        corrected_data = cube.data * (10**(0.4 * A_lam[:, None, None]))
+
+    print(f"Extinction correction applied with Av={Av}, undo={undo}")
+
+    # Create new Cube while preserving WCS + header
+    corrected_cube = Cube(data=corrected_data,
+                          wave=cube.wave,
+                          var=cube.var,
+                          mask=cube.mask,
+                          wcs=cube.wcs,
+                          copy=True)
+    corrected_cube.primary_header = cube.primary_header.copy()
+    corrected_cube.data_header = cube.data_header.copy()
+    corrected_cube.data_header['EXTCORR'] = (not undo, 'Milky Way extinction correction applied')
+
+    # Save if requested
+    if output_filename is not None:
+        corrected_cube.write(output_filename, overwrite=True)
+        print(f"Saved corrected cube to {output_filename}")
+    if return_a_lam:
+        return corrected_cube, A_lam
+    return corrected_cube
+
+
+
+
+
+
+def preRedshiftExtCor(cube_path):
+    
+    print(f"Go to https://ned.ipac.caltech.edu/byname")
+    print("Step 1: enter the galaxy name")
+    print("Step 2: copy/paste the RA and Dec coordinates into the extinction calculator: https://ned.ipac.caltech.edu/extinction_calculator")
+    ra_deg = 346.235578   
+    dec_deg = 19.552296
+    print(f"Cube path is: {cube_path}")
+    cube = Cube(cube_path)
+    print(f"Cube path after making cube is: {cube_path}")
+    lamdas = cube.wave.coord()    
+    lam_central_um = lamdas.mean() / 1e4 
+    print(f" Your central wavelength is {lam_central_um}")
+    print(f" Step 3: Filter for => {lam_central_um} and =< {lam_central_um} in the Central Wavelength column ")
+
+
+
+    # --- Step 1: Get Av from NED ---
+    # Using Sloan g': 0.385 (central wavelength 0.4925)
+    Av = float(input( "Step 4: Enter the Galactic Extinction (mag) number from the extinction calculator: "))
+
+    # Step 2: 
+    # Edited: DO THE CORRECTION
+    cube_with_corr, A_lam = milky_way_extinction_correction_cube(cube_path, Av, undo=False, return_a_lam=True)
+    cube_with_corr.write("/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/Output_cubes/cube_without_corr.fits")
+    print(f" Milky Way correction at observed redshift: {A_lam}")
+    return cube_with_corr
+
+def postPipelineExtCor(final_pipeline_cube_path):
+    final_pipeline_cube = Cube(final_pipeline_cube_path)
+    lamdas_post = final_pipeline_cube.wave.coord() 
+    lam_central_um = lamdas_post.mean() / 1e4 
+    print(f" Your new central wavelength is {lam_central_um}")
+    print(f" Filter for => {lam_central_um} and =< {lam_central_um} in the Central Wavelength column ")
+    # Using UKIRT J: 0.072 (central wavelength 1.2483)
+    Av_z = float(input( " Enter the new Galactic Extinction (mag) number from the extinction calculator: "))
+
+    # Step 4: 
+    # UNDO CORRECTION
+    cube_without_corr = milky_way_extinction_correction_cube(final_pipeline_cube_path, Av_z, undo=True)
+    return cube_without_corr
+
 
 
 if __name__ == "__main__":
@@ -198,9 +227,17 @@ if __name__ == "__main__":
     cube_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/cgcg453_red_mosaic.fits"
     cube = Cube(cube_path)
 
-
     lamdas = cube.wave.coord()    
     data = cube.data     
+
+    print("---------- Testing modular functions --------")
+    cube_with_corr = preRedshiftExtCor(cube_path)
+    final_pipeline_cube_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/Output_cubes/CGCG453/CGCG453_z_3_f170lp_g235h_lsf.fits"
+    final_pipeline_cube = Cube(final_pipeline_cube_path)
+    postPipelineExtCor(final_pipeline_cube)
+    print(" --------- Modular function tests finished --------")
+
+
 
     print(f"Go to https://ned.ipac.caltech.edu/byname")
     print("Step 1: enter the galaxy name")
@@ -217,7 +254,7 @@ if __name__ == "__main__":
     # Using Sloan g': 0.385 (central wavelength 0.4925)
     Av = float(input( " Enter the Galactic Extinction (mag) number from the extinction calculator: "))
 
-    # Step 2: Undo correction
+    # Step 2: 
     # Edited: DO THE CORRECTION
     data_with_ext = milky_way_extinction_correction(lamdas, data, Av, undo=False)
 
@@ -235,7 +272,7 @@ if __name__ == "__main__":
     Av_z = float(input( " Enter the new Galactic Extinction (mag) number from the extinction calculator: "))
 
 
-    # Step 4: Reapply extinction correction
+    # Step 4: 
     # UNDO CORRECTION
     data_final = milky_way_extinction_correction(lamdas_z, data_z, Av_z, undo=True)
 

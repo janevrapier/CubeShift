@@ -7,7 +7,6 @@ from zWavelengths import redshift_wavelength_axis
 from binData import resample_cube_to_telescope_and_redshift, bin_cube, calculate_spatial_resampling_factor, abs_calculate_spatial_resampling_factor
 from simulateObs import scale_luminosity_for_redshift, convolve_to_match_psf
 from reprojectBinData import reproject_cube_preserve_wcs
-from astropy.wcs import WCS as AstropyWCS
 from astropy.wcs import WCS
 from cropCube import auto_crop_cube, trim_empty_edges
 from applyFilter import apply_transmission_filter

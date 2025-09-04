@@ -2,7 +2,7 @@ from mpdaf.obj import Cube
 import numpy as np
 import matplotlib.pyplot as plt
 from astropy.constants import c
-import numpy as np
+
 
 # Load IFU cube (MPDAF automatically handles WCS)
 cube = Cube("/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/Output_cubes/z_4.0_f070lp_g235h_lsf.fits")

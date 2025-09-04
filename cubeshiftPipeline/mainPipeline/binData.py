@@ -1,26 +1,30 @@
 import numpy as np 
-from mpdaf.obj import Cube
+from mpdaf.obj import Cube, Image
 from astropy.cosmology import Planck18 as cosmo
 import astropy.units as u
 from scipy.ndimage import zoom
 import matplotlib.pyplot as plt
 from reprojectBinData import reproject_cube_preserve_wcs
 from astropy.wcs import WCS as AstropyWCS 
-from cropCube import auto_crop_cube, trim_empty_edges
+from cropCube import auto_crop_cube, trim_empty_edges, crop_cube_to_size
+from ioTools import read_in_data
 
 class Telescope:
-    def __init__(self, name, spatial_fwhm, pixel_scale_x, pixel_scale_y, spectral_resolution,
+    def __init__(self, name, spatial_fwhm, pixel_scale_x, pixel_scale_y, spectral_resolution, fov_x=None, fov_y=None,
                  spectral_sampling=None):
         self.name = name
         self.spatial_fwhm = spatial_fwhm  # arcsec
         self.pixel_scale_x = pixel_scale_x    # arcsec/pixel
         self.pixel_scale_y = pixel_scale_y    # arcsec/pixel
         self.spectral_resolution = spectral_resolution  # R = λ/Δλ
+        self.fov_x = fov_x
+        self.fov_y = fov_y
         self.spectral_sampling = spectral_sampling  # Δλ in Å 
 
 # Telescope dict
 # Holds telescope OBJECTS (!)
 telescope_specs = {
+    # Need to add FOV to the rest of the telescopes if you want to use them (JWST NIRSpec is the only one that currently has it)
     "JWST_NIRCam": Telescope(
         name="JWST NIRCam",
         pixel_scale_x=0.031,  # arcsec/pixel
@@ -42,6 +46,8 @@ telescope_specs = {
         pixel_scale_y=0.1,
         spatial_fwhm=0.07,     # arcsec — diffraction-limited like NIRCam
         spectral_resolution=1000,  # for medium-resolution gratings (R~1000–2700)
+        fov_x=3.0,           # arcseconds
+        fov_y=3.0,            # arcseconds
         spectral_sampling=2.0  # Å — approximate; varies with configuration
     ),
     "Keck_KCWI": Telescope(
@@ -58,6 +64,16 @@ telescope_specs = {
 def calc_proper_dist(z):
     """Return angular diameter distance in parsecs at redshift z"""
     return cosmo.angular_diameter_distance(z).to(u.pc)
+
+
+def get_spaxel_area(cube):
+    """
+    Return spaxel area in arcsec^2 from MPDAF cube.
+    Uses MPDAF's WCS helper instead of raw astropy.wcs.
+    """
+    dx_arcsec, dy_arcsec = cube.wcs.get_step(unit='arcsec')
+    return abs(dx_arcsec * dy_arcsec)
+
 
 
 
@@ -93,7 +109,7 @@ def _reduction_factor_to_array(x_factor, y_factor, data_cube):
 
 
 
-def bin_cube(x_factor, y_factor, data_cube, margin='center', method='sum', inplace=False):
+def bin_cube(x_factor, y_factor, data_cube, margin='center', method='sum', inplace=False, surface_brightness=True):
     """Combine the neighbouring pixels to reduce the spatial size of the array 
     by integer factors along the x and y axes.  Each output pixel is the sum of 
     n pixels, where n is the product of the reduction factors x_factor and 
@@ -237,6 +253,11 @@ def bin_cube(x_factor, y_factor, data_cube, margin='center', method='sum', inpla
     # Apply the chosen reduction method across the binning axes
     if method == 'sum':
         newdata = np.nansum(newdata, axis=bin_axes)
+        # if surface brightness is requested, divide by the number of pixels
+        # summed to create each output pixel
+        if surface_brightness:
+            newdata /= unmasked
+        data_cube._data = newdata.data 
     elif method == 'mean':
         newdata = np.nanmean(newdata, axis=bin_axes)
     elif method == 'median':
@@ -285,302 +306,304 @@ def bin_cube(x_factor, y_factor, data_cube, margin='center', method='sum', inpla
     if data_cube._has_wcs and data_cube.wcs is not None and data_cube.ndim > 1:
         data_cube.wcs = data_cube.wcs.rebin([factor[-2], factor[-1]])
     
+    # Preserve wavelength axis
+    if hasattr(data_cube, "wave") and data_cube.wave is not None:
+        data_cube.wave = data_cube.wave.copy()
 
+    print(f" Wave of binned cube: {data_cube.wave}")
     return data_cube
 
 
 
 
-def remove_var(data_cube):
-    """Creates a cube or image without the variance extension
 
-    Parameters
-    ----------
-    data_cube : `~mpdaf.obj.Cube` or `~mpdaf.obj.Image` object
-        The mpdaf Cube/Image object
-
-    Returns
-    -------
-    `~mpdaf.obj.Cube` or `~mpdaf.obj.Image` object
-        The input data without the variance extension
-    """
-    # clone the cube 
-    data_cube_novar = data_cube.clone()
-
-    # give it the data extension
-    data_cube_novar.data = data_cube.data 
-
-    return data_cube_novar
-
-
-def bin_cubes_and_remove_var(x_factor_list, y_factor_list, cube_list, redshift=None, **kwargs):
-    """Takes the input cube list and bins the data x_factor x y_factor according 
-    to the input lists.  Will save the output and name the results using either 
-    the parsecs of the binned spaxels or the x by y factors depending on if the 
-    redshift information has been given.
-
-    Parameters
-    ----------
-    x_factor_list : list
-        the integers by which to bin in the x direction
-    y_factor_list : list
-        the integers by which to bin in the y direction.  Must be the same length 
-        as x_factor_list.
-    cube_list : list
-        the filenames of the cubes to read in
-    redshift : float or list or None, optional
-        the redshift of the cubes, either a list of redshifts or a single value 
-        for all cubes.  Used to calculate the proper distance, and thereby find 
-        the new physical size of the binned spaxels, which is used in the saved 
-        file name.  If None, the filename uses the x_factor by y_factor instead.
-        By default None.
-    """
-
-    # check that x_factor_list and y_factor_list are the same length 
-    assert len(x_factor_list) == len(y_factor_list), "x_factor_list must be same length as y_factor_list"
-    
-    # iterate through cube list 
-    for i, file in enumerate(cube_list):
-        # open the file as a cube
-        this_cube = Cube(file)
-        this_cube.filename = file  # manually attach filename
-
-
-        # if redshift given calculate the proper distance
-        if redshift:
-            if type(redshift)==list:
-                proper_dist = calc_proper_dist(redshift[i])
-            else:
-                proper_dist = calc_proper_dist(redshift)
-
-        # bin the cube - iterate through the x/y_factor lists 
-        for j in range(len(x_factor_list)):
-            binned_cube = bin_cube(x_factor_list[j], y_factor_list[j], this_cube, **kwargs)
-
-            # calculate the new bin size in pc (if the redshift was given)
-            if redshift:
-                pixel_scale_rad = binned_cube.wcs.get_axis_increments(u.arcsec)[0] * u.arcsec
-                bin_size = proper_dist * pixel_scale_rad.to(u.radian)
-
-                new_filename = binned_cube.filename.split('.fits')[0] + "_binned_{:0>3d}pc.fits".format(int(bin_size.value))
-            else:
-                new_filename = binned_cube.filename.split('.fits')[0] + "_binned_{:0>3d}x{:0>3d}spax.fits".format(x_factor_list[j], y_factor_list[j])
-
-            # save the cube
-            binned_cube.write(new_filename, savemask=False)
-
-            # remove the variance 
-            binned_cube_novar = remove_var(binned_cube)
-
-            # save the cube
-            new_filename = new_filename.split('.fits')[0] + "_novar.fits"
-            binned_cube_novar.write(new_filename, savemask=False)
-
-def calculate_rebin_factors(z_obs, z_sim, original_pixel_scale_arcsec, desired_new_pixel_scale_arcsec=None):
-    """
-    Calculate rebinning factor to match angular resolution at high redshift.
-
-    Parameters
-    ----------
-    z_obs : float
-        Redshift of the original cube (e.g. 0.02)
-    z_sim : float
-        Redshift you want to simulate (e.g. 2.0)
-    original_pixel_scale_arcsec : float
-        Original cube's spatial pixel scale in arcsec/pixel (e.g. 0.29")
-    desired_new_pixel_scale_arcsec : float, optional
-        Pixel scale of the new telescope. If None, it will be derived from redshift.
-
-    Returns
-    -------
-    rebin_factor : float
-        How much to bin the original cube spatially to match simulated resolution.
-    """
-
-    # Proper kpc per arcsec
-    kpc_per_arcsec_old = cosmo.kpc_proper_per_arcmin(z_obs).to(u.kpc/u.arcsec)
-    kpc_per_arcsec_new = cosmo.kpc_proper_per_arcmin(z_sim).to(u.kpc/u.arcsec)
-
-    # Physical size of 1 pixel in original cube
-    spaxel_size_kpc = original_pixel_scale_arcsec * u.arcsec * kpc_per_arcsec_old
-
-    # Convert back to angular size at new redshift
-    new_spaxel_size_arcsec = (spaxel_size_kpc / kpc_per_arcsec_new).to(u.arcsec)
-
-    # If telescope has finite pixel scale (e.g. JWST), use it as a limit
-    if desired_new_pixel_scale_arcsec:
-        new_spaxel_size_arcsec = max(new_spaxel_size_arcsec.value, desired_new_pixel_scale_arcsec) * u.arcsec
-
-    # Calculate rebin factor
-    rebin_factor = (new_spaxel_size_arcsec / (original_pixel_scale_arcsec * u.arcsec)).value
-    
-
-    return rebin_factor
-
-def calculate_spatial_resampling_factor(
-    z_obs, z_sim,
-    original_pixel_scale_arcsec,
-    target_telescope_resolution_arcsec
-):
-    """
-    Calculate the spatial binning (or interpolation) factor needed to simulate
-    observations of a nearby galaxy at high redshift using a given telescope.
-
-    Parameters
-    ----------
-    z_obs : float
-        Redshift of the original observation (e.g. 0.02).
-    z_sim : float
-        Redshift you want to simulate (e.g. 2.0).
-    original_pixel_scale_arcsec : float
-        Spatial resolution of original cube (arcsec/pixel).
-    target_telescope_resolution_arcsec : float
-        Angular resolution limit (e.g. pixel scale or PSF FWHM) of new telescope.
-
-    Returns
-    -------
-    rebin_factor : float
-        Ratio of new to old spaxel size (arcsec), after accounting for angular scaling.
-        >1 → binning (decrease resolution)
-        <1 → interpolate (increase resolution)
-    new_spaxel_size_arcsec : float
-        Effective spaxel size at high z in arcsec/pixel.
-    """
-    # Get angular diameter distances
-    Da_old = cosmo.angular_diameter_distance(z_obs)
-    Da_new = cosmo.angular_diameter_distance(z_sim)
-
-    # Calculate how the *physical* size of a spaxel appears at new redshift
-    physical_size_kpc = original_pixel_scale_arcsec * u.arcsec * cosmo.kpc_proper_per_arcmin(z_obs).to(u.kpc/u.arcsec)
-    new_spaxel_size_arcsec = (physical_size_kpc / cosmo.kpc_proper_per_arcmin(z_sim).to(u.kpc/u.arcsec)).to(u.arcsec)
-
-    # But telescope has a floor — we cannot get better than its resolution
-    new_spaxel_size_arcsec = max(new_spaxel_size_arcsec.value, target_telescope_resolution_arcsec)
-
-    # Rebin factor = how many original pixels make up one simulated pixel
-    rebin_factor = new_spaxel_size_arcsec / original_pixel_scale_arcsec
-
-    return rebin_factor, new_spaxel_size_arcsec
-
-def abs_calculate_spatial_resampling_factor(pixel_scale_x, pixel_scale_y,
-                                            target_pixel_scale_x, target_pixel_scale_y,
-                                            z_obs, z_sim):
-
-    """
-    Return how much to spatially bin (in x and y) to match the physical size per pixel
-    that you would have if this galaxy were at z_sim and observed with the new telescope.
-    """
-
-    # Convert angular scales to physical sizes
-    dA_old = cosmo.angular_diameter_distance(z_obs)
-    dA_new = cosmo.angular_diameter_distance(z_sim)
-
-    # Physical size per pixel at original redshift
-    phys_size_x_kpc = (pixel_scale_x * u.arcsec).to(u.radian).value * dA_old.to(u.kpc).value
-    phys_size_y_kpc = (pixel_scale_y * u.arcsec).to(u.radian).value * dA_old.to(u.kpc).value
-
-    # Desired physical pixel size at z_sim (target telescope scale)
-    target_phys_x_kpc = (target_pixel_scale_x * u.arcsec).to(u.radian).value * dA_new.to(u.kpc).value
-    target_phys_y_kpc = (target_pixel_scale_y * u.arcsec).to(u.radian).value * dA_new.to(u.kpc).value
-
-    # How much you need to bin to match that
-    x_factor = target_phys_x_kpc / phys_size_x_kpc
-    y_factor = target_phys_y_kpc / phys_size_y_kpc
-
-    return x_factor, y_factor
 
 def resample_cube_to_telescope_and_redshift(
     cube,
-    source_telescope,
     target_telescope,
     z_source,
     z_target,
     trim=True,
+    check_numbers=False,
+    scaling="Giavalisco",   # "DA" or "Giavalisco"
+    name=None
 ):
-
-# use abs_calculate_spatial_resampling_factor !!!! (shrink factor)
     """
-    Resample an input cube by binning it to match the spatial resolution of a target telescope
-    at a higher redshift.
+    Resample an input cube by binning it to match the spatial resolution
+    of a target telescope at a higher redshift, then pad or crop to match
+    the target telescope FOV.
+
+    Returns
+    -------
+    If check_numbers is False:
+        cube_resampled : mpdaf.obj.Cube
+        bin_factors    : tuple(int, int)  -> (bin_x, bin_y)
+        wave_step      : float or None
+        dx_arcsec_new  : float  -> pixel scale along x after binning (arcsec/pix)
+        dy_arcsec_new  : float  -> pixel scale along y after binning (arcsec/pix)
+    If check_numbers is True:
+        cube_resampled, bin_factors, wave_step, dx_arcsec_new, dy_arcsec_new, extra1, s_x, s_y
+        where extra1 is f_ang (DA) or (L_source, L_target) (Giavalisco)
+    """
+    import numpy as np
+    import astropy.units as u
+    from astropy.cosmology import Planck18 as cosmo
+
+    # --- Step 0: extract original cube info from header ---
+    try:
+        _, _, hdr = read_in_data(cube)
+    except Exception:
+        _, _, _, hdr = read_in_data(cube)
+
+    print(f"[DEBUG] cube type: {type(cube)}")
+    print(f"[DEBUG] cube WCS: {getattr(cube, 'wcs', None)}")
+
+    # Spatial pixel scale in arcsec/pixel (robust for MPDAF)
+    # MPDAF returns (dx, dy) in the requested unit.
+    dx_arcsec_src, dy_arcsec_src = cube.wcs.get_step(unit='arcsec')
+    dx_arcsec_src = float(abs(dx_arcsec_src))
+    dy_arcsec_src = float(abs(dy_arcsec_src))
+
+    # Wavelength step (if needed)
+    wave_step = hdr.get('CDELT3', None)
+
+    print("[DEBUG] Source pixel scale (x,y):", dx_arcsec_src, dy_arcsec_src)
+    print("[DEBUG] Target telescope pixel scale (x,y):", target_telescope.pixel_scale_x, target_telescope.pixel_scale_y)
+    print("[DEBUG] z_obs =", z_source, " z_sim =", z_target)
+
+    # --- Step 1: compute scaling ---
+    scaling = scaling.lower()
+    if scaling == "da":
+        f_ang = (cosmo.angular_diameter_distance(z_source) /
+                 cosmo.angular_diameter_distance(z_target)).value
+        s_x = f_ang * (dx_arcsec_src / target_telescope.pixel_scale_x)
+        s_y = f_ang * (dy_arcsec_src / target_telescope.pixel_scale_y)
+        method_used = "Angular Diameter Distance"
+    elif scaling == "giavalisco":
+        L_source = cosmo.luminosity_distance(z_source).to(u.Mpc).value
+        L_target = cosmo.luminosity_distance(z_target).to(u.Mpc).value
+        # Note: these s_x, s_y are your existing definitions
+        s_x = ((1+z_source)**2 / (1+z_target)**2) * (L_target / L_source) * (target_telescope.pixel_scale_x / dx_arcsec_src)
+        s_y = ((1+z_source)**2 / (1+z_target)**2) * (L_target / L_source) * (target_telescope.pixel_scale_y / dy_arcsec_src)
+        method_used = "Giavalisco scaling"
+    else:
+        raise ValueError(f"Unknown scaling method: {scaling}")
+
+    print(f"Scaling method: {method_used}")
+    print(f"Raw resampling factors: s_x = {s_x:.3f}, s_y = {s_y:.3f}")
+
+    # --- Step 2: Round to integer for binning ---
+    # Remember: mpdaf cube shape is (nw, ny, nx)
+    bin_factor_x = max(1, int(round(s_x)))
+    bin_factor_y = max(1, int(round(s_y)))
+    print(f"Integer bin factors: {bin_factor_x}, {bin_factor_y}")
+
+    # --- Step 3: Bin the cube (order is bin_y, bin_x) ---
+    cube_binned = bin_cube(bin_factor_y, bin_factor_x, cube)
+
+    if trim:
+        cube_binned = trim_empty_edges(cube_binned)
+
+    ny_binned, nx_binned = cube_binned.shape[1], cube_binned.shape[2]
+    print(f"[DEBUG] After binning: cube shape = {ny_binned} × {nx_binned}")
+
+    # Compute new pixel scales (arcsec/pix). Prefer reading from the binned WCS.
+    try:
+        dx_arcsec_new, dy_arcsec_new = cube_binned.wcs.get_step(unit='arcsec')
+        dx_arcsec_new = float(abs(dx_arcsec_new))
+        dy_arcsec_new = float(abs(dy_arcsec_new))
+    except Exception:
+        # Fallback: scale original by the bin factors
+        dx_arcsec_new = float(abs(dx_arcsec_src * bin_factor_x))
+        dy_arcsec_new = float(abs(dy_arcsec_src * bin_factor_y))
+
+    # --- Step 4: Determine target FOV in pixels from telescope ---
+    target_nx = int(np.round(target_telescope.fov_x / target_telescope.pixel_scale_x))
+    target_ny = int(np.round(target_telescope.fov_y / target_telescope.pixel_scale_y))
+    print(f"[DEBUG] Target telescope FOV in pixels: {target_ny} × {target_nx}")
+
+    # --- Step 5: Pad or crop cube to match telescope FOV ---
+    needs_pad_x = nx_binned < target_nx
+    needs_pad_y = ny_binned < target_ny
+
+    if needs_pad_x or needs_pad_y:
+        print("[DEBUG] Padding cube in one or both directions")
+        cube_resampled = pad_cube_with_background(
+            cube_binned,
+            target_nx if needs_pad_x else nx_binned,
+            target_ny if needs_pad_y else ny_binned,
+            name=name
+        )
+    else:
+        cube_resampled = cube_binned
+
+    # After padding/cropping, pixel scale is unchanged.
+    print(f"[DEBUG] Final pixel scale after binning (x,y) = ({dx_arcsec_new}, {dy_arcsec_new}) arcsec/pix")
+
+    # --- Return values ---
+    if check_numbers:
+        if scaling == "giavalisco":
+            # Keep s_x, s_y for your debug; also return (L_source, L_target)
+            return (cube_resampled,
+                    (bin_factor_x, bin_factor_y),
+                    wave_step,
+                    dx_arcsec_new, dy_arcsec_new,
+                    (L_source, L_target),
+                    s_x, s_y)
+        else:
+            return (cube_resampled,
+                    (bin_factor_x, bin_factor_y),
+                    wave_step,
+                    dx_arcsec_new, dy_arcsec_new,
+                    float(f_ang),
+                    s_x, s_y)
+
+    return cube_resampled, (bin_factor_x, bin_factor_y), wave_step, dx_arcsec_new, dy_arcsec_new
+
+
+def pad_cube_with_background(cube, target_nx, target_ny, name=None):
+    """
+    Pad an MPDAF Cube to a larger spatial size with background values
+    estimated from each wavelength slice, while preserving WCS,
+    variance, and mask if they exist. Noise is added to the padding
+    based on the background level and its standard deviation.
 
     Parameters
     ----------
     cube : mpdaf.obj.Cube
-        The input IFU cube at redshift z_source.
-    source_telescope : Telescope
-        The telescope object describing the original observation.
-    target_telescope : Telescope
-        The telescope object describing the target simulation instrument.
-    z_source : float
-        Redshift of the input cube.
-    z_target : float
-        Redshift to simulate.
-
+        Input cube to pad.
+    target_nx : int
+        Desired number of pixels along x axis.
+    target_ny : int
+        Desired number of pixels along y axis.
 
     Returns
     -------
-    cube_resampled : mpdaf.obj.Cube
-        The resampled cube matching the target telescope resolution at z_target.
-    bin_factors : tuple(int, int)
-        The binning factors applied along x and y axes.
+    cube_padded : mpdaf.obj.Cube
+        Cube padded with noisy background values to target size.
     """
 
-    from astropy.cosmology import Planck18 as cosmo
+    # padding should be determined by the bin factor -- a certain amount to make up the field of view
+    # does it need to be cropped? if yes, crop, if no ask:
+    # does it fill the FOV
+    # if yes, leave it, if no, pad to fit target FOV
+    nz, ny, nx = cube.shape
+    print(f"[DEBUG] Original cube shape: {nz} x {ny} x {nx}")
+    print(f"[DEBUG] Target cube shape: {nz} x {target_ny} x {target_nx}")
 
-    # Get proper kpc per arcsec at source and target redshifts
-    kpc_per_arcsec_source = cosmo.kpc_proper_per_arcmin(z_source).to_value(u.kpc / u.arcsec)
-    kpc_per_arcsec_target = cosmo.kpc_proper_per_arcmin(z_target).to_value(u.kpc / u.arcsec)
-    print(f"kpc per arcsec {kpc_per_arcsec_target}")
-    print(f"kpc per arcsec {kpc_per_arcsec_source}")
+    # Compute offsets to center original cube in padded cube
+    x0 = (target_nx - nx) // 2
+    y0 = (target_ny - ny) // 2
+    print(f"[DEBUG] Offsets for centering: x0={x0}, y0={y0}")
+    print(f"Cube shape after padding: {nz} x {target_ny} x {target_nx}, memory ~ {nz*target_ny*target_nx*8/1e9:.2f} GB")
 
-    # Calculate physical spaxel sizes
-    phys_source_x = source_telescope.pixel_scale_x * kpc_per_arcsec_source
-    phys_source_y = source_telescope.pixel_scale_y * kpc_per_arcsec_source
-    phys_target_x = target_telescope.pixel_scale_x * kpc_per_arcsec_target
-    phys_target_y = target_telescope.pixel_scale_y * kpc_per_arcsec_target
 
-    print(f"Source physical spaxel size: {phys_source_x:.3f} kpc × {phys_source_y:.3f} kpc")
-    print(f"Target physical spaxel size: {phys_target_x:.3f} kpc × {phys_target_y:.3f} kpc")
+    # Initialize padded arrays
+    padded_data = np.zeros((nz, target_ny, target_nx), dtype=np.float32)
+    padded_var  = None
+    padded_mask = None
 
-    # Calculate binning factors needed
-    bin_factor_x = phys_target_x / phys_source_x
-    bin_factor_y = phys_target_y / phys_source_y
+    if cube.var is not None:
+        padded_var = np.zeros((nz, target_ny, target_nx), dtype=cube.var.dtype)
+    if cube.mask is not None:
+        padded_mask = np.ones((nz, target_ny, target_nx), dtype=bool)
 
-    print(f"Binning factors (x, y): {bin_factor_x:.2f}, {bin_factor_y:.2f}")
+    # Estimate background for each slice and add Gaussian noise
+    bkg_list = []
+    for k in range(cube.shape[0]):  # loop over wavelength slices
+        bkg, bkg_std = cube[k].background()  # mean and std from MPDAF
+        bkg_list.append(bkg)
+        
 
-    # Decide if binning needed
-    if bin_factor_x > 1.0 or bin_factor_y > 1.0:
-        # Round bin factors to nearest integer
-        bin_factor_x_int = max(1, int(round(bin_factor_x)))
-        bin_factor_y_int = max(1, int(round(bin_factor_y)))
-        print(f"Applying integer binning factors: {bin_factor_x_int} × {bin_factor_y_int}")
+        # fill slice with noisy background
+        if name == "CGCG453":
+            bkg_std *= 0.5 # smaller → less noisy, darker background; larger → more noisy
 
-        # Bin the cube
-        cube_resampled = bin_cube(bin_factor_x_int, bin_factor_y_int, cube)
+        padded_data[k, :, :] = np.random.normal(
+            loc=bkg, scale=bkg_std, size=(target_ny, target_nx)
+        )
 
-        # Optionally trim edges if function provided
-        if trim:
-            cube_resampled = trim_empty_edges(cube_resampled)
+        # insert the real data back into the center
+        padded_data[k,
+                    y0:y0 + cube.shape[1],
+                    x0:x0 + cube.shape[2]] = cube[k].data
 
-        return cube_resampled, (bin_factor_x_int, bin_factor_y_int)
+        if padded_var is not None:
+            padded_var[k, y0:y0+ny, x0:x0+nx] = cube.var[k, :, :]
+        if padded_mask is not None:
+            padded_mask[k, y0:y0+ny, x0:x0+nx] = cube.mask[k, :, :]
+    bkg_list = np.array(bkg_list)
+
+    print(f"bkg mean: {np.mean(bkg_list)}")
+    if name == "CGCG453":
+        print(" bkg std scaled by 0.5 ")
+
+
+    # Carry over WCS from the original cube and preserve wave + mask
+    # Ensure types match what Cube expects
+    # Convert padded arrays to masked array where appropriate
+    if padded_mask is not None:
+        padded_mask = np.asarray(padded_mask, dtype=bool)
+        padded_data = np.ma.array(padded_data, mask=~padded_mask)
     else:
-        print("No binning needed; resolution improves or remains same.")
-        return cube, (1, 1)
+        # keep as plain ndarray if there's no mask
+        padded_data = np.asarray(padded_data)
+
+    # Create Cube while explicitly passing wave and mask
+    cube_padded = Cube(
+        data=padded_data,
+        var=padded_var,
+        wcs=cube.wcs,
+        wave=cube.wave,     # <-- preserve the spectral axis
+        mask=padded_mask,   # <-- preserve mask if available
+        copy=False
+    )
+
+    # Safety: if constructor did not set wave for some reason, restore it
+    if getattr(cube_padded, "wave", None) is None and getattr(cube, "wave", None) is not None:
+        cube_padded.wave = cube.wave.copy()
+
+    print(f"[DEBUG] Padded cube shape: {cube_padded.shape}")
+    print(f"[DEBUG] Padded cube wave: {cube_padded.wave}")
+    return cube_padded
+
+
+
+
+
+
 
 
 if __name__ == "__main__":
 
-    from mpdaf.obj import Cube
-    from astropy.cosmology import Planck18 as cosmo
-    import astropy.units as u
-    import numpy as np
-    import matplotlib.pyplot as plt
+
 
 
     # === Load data ===
     print("\n=== Loading Cube ===")
-    file_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/Output_cubes/test_z_0.5_redshifted.fits"
-    cube = Cube(file_path)
+    # name = "TEST"
+    # file_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/Output_cubes/test_z_0.5_redshifted.fits"
+    # cube = Cube(file_path)
+    # z_obs = 0.01  # original galaxy redshift
+    # z_sim = 0.5    # simulated redshift
+
+    # name = "CGCG453"
+    # file_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/Output_cubes/CGCG453/CGCG453_redshifted_cube_3.fits"
+    # cube = Cube(file_path)
+    # z_obs = 0.025  # original galaxy redshift
+    # z_sim = 0.3    # simulated redshift
+
+    # name = "UGC10099"
+    # file_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/UGC10099/J155636_red_mosaic.fits"
+    # cube = Cube(file_path)
+    # z_obs = 0.035 # from NED: 0.034713 (heliocentric)
+    # z_sim = 3
+
+    name = "IRAS08"
+    file_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/IRAS08/IRAS08_combined_final_metacube.fits"
+    cube = Cube(file_path, ext=1)
+    z_obs = 0.019 
+    z_sim = 3
 
     # === Define source and target telescopes ===
     source_telescope = telescope_specs["Keck_KCWI"]
@@ -590,107 +613,74 @@ if __name__ == "__main__":
     print(f"  From → {source_telescope.name}")
     print(f"  To   → {target_telescope.name}")
 
-    # === Define redshifts ===
-    z1 = 0.01  # original galaxy redshift
-    z2 = 0.5    # simulated redshift
 
-
-    cropped_resampled_cube, bin_factors = resample_cube_to_telescope_and_redshift(
+    cropped_resampled_cube, bin_factors, wave_step = resample_cube_to_telescope_and_redshift(
         cube=cube,
-        source_telescope=telescope_specs["Keck_KCWI"],
         target_telescope=telescope_specs["JWST_NIRSpec"],
-        z_source=0.01,
-        z_target=0.5,
+        z_source=z_obs,
+        z_target=z_sim,
+        name=name
 
     )
 
     print(f"Final bin factors applied: {bin_factors}")
 
-
-
-
-    # # === Optional: pre-binning test ===
-    # print("\nOptional: testing binning operation (not used downstream)...")
-    # bin_cubes_and_remove_var(
-    #     x_factor_list=[2, 4],
-    #     y_factor_list=[2, 4],
-    #     cube_list=[file_path],
-    #     redshift=z1
-    # )
-
-    # # === Angular scaling (info only) ===
-    # print("\n=== Angular Rescaling ===")
-    # factor, new_pix = calculate_spatial_resampling_factor(
-    #     z_obs=z1,
-    #     z_sim=z2,
-    #     original_pixel_scale_arcsec=source_telescope.pixel_scale_x,  # still OK here
-    #     target_telescope_resolution_arcsec=target_telescope.pixel_scale_x
-    # )
-    # print(f"Angular resampling factor: {factor:.2f}")
-    # print(f"New simulated pixel size: {new_pix:.4f} arcsec")
-
-    # # === Physical Resolution Check ===
-    # print("\n=== Physical Scale Comparison ===")
-
-    # # Calculate physical resolution per spaxel in both telescopes
-    # kpc_per_arcsec_old = cosmo.kpc_proper_per_arcmin(z1).to(u.kpc/u.arcsec).value
-    # kpc_per_arcsec_new = cosmo.kpc_proper_per_arcmin(z2).to(u.kpc/u.arcsec).value
-
-    # orig_kpc_x = source_telescope.pixel_scale_x * kpc_per_arcsec_old
-    # orig_kpc_y = source_telescope.pixel_scale_y * kpc_per_arcsec_old
-    # new_kpc_x = target_telescope.pixel_scale_x * kpc_per_arcsec_new
-    # new_kpc_y = target_telescope.pixel_scale_y * kpc_per_arcsec_new
-
-    # print(f"KCWI spaxel size: {source_telescope.pixel_scale_x:.2f}\" × {source_telescope.pixel_scale_y:.2f}\"")
-    # print(f"  → Physical: {orig_kpc_x:.2f} × {orig_kpc_y:.2f} kpc")
-
-    # print(f"NIRSpec spaxel size: {target_telescope.pixel_scale_x:.2f}\" × {target_telescope.pixel_scale_y:.2f}\"")
-    # print(f"  → Physical: {new_kpc_x:.2f} × {new_kpc_y:.2f} kpc")
-
-    # # === Binning Strategy ===
-    # print("\n=== Binning Strategy ===")
-
-    # rebin_factor_x = new_kpc_x / orig_kpc_x
-    # rebin_factor_y = new_kpc_y / orig_kpc_y
-
-    # print(f"→ Binning factor (X): {rebin_factor_x:.2f}")
-    # print(f"→ Binning factor (Y): {rebin_factor_y:.2f}")
-
-    # if rebin_factor_x > 1.0 or rebin_factor_y > 1.0:
-    #     print("→ Binning required to match simulated resolution.")
-    #     bin_factor_x = int(np.round(rebin_factor_x))
-    #     bin_factor_y = int(np.round(rebin_factor_y))
-    #     print(f"Using integer binning: {bin_factor_x} × {bin_factor_y}")
-    #     cube_resampled = bin_cube(bin_factor_x, bin_factor_y, cube)
-    # else:
-    #     print("→ No binning required. Resolution improves or stays the same.")
-    #     cube_resampled = cube.copy()
-
-    # # === Trim and save result ===
-    # print("\n=== Trimming and Saving Cube ===")
-    # cropped_resampled_cube = trim_empty_edges(cube_resampled)
-
-    output_path = "/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/binData_cube.fits"
+    output_path = f"/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/Output_cubes/{name}/binData_cube_{name}.fits"
     cropped_resampled_cube.write(output_path)
     print(f"✔ Resampled cube saved to: {output_path}")
+
+
+    # === Pixel scale & aspect ratio check ===
+    # --- Safe way to get pixel scales from WCS ---
+    try:
+        # If cube is an MPDAF cube, this works directly
+        cdelt = cropped_resampled_cube.wcs.get_step(unit='arcsec')  # (dy, dx)
+        cdelt1, cdelt2 = cdelt[1], cdelt[0]  # RA, Dec
+    except AttributeError:
+        # Fall back to Astropy WCS
+        cdelt = cropped_resampled_cube.wcs.pixel_scale_matrix
+        # Convert degrees → arcsec
+        cdelt1 = abs(cdelt[0, 0]) * 3600
+        cdelt2 = abs(cdelt[1, 1]) * 3600
+
+    aspect = abs(cdelt1 / cdelt2)
+
+    print("Pixel scales (arcsec):", cdelt1, cdelt2)
+    print("Aspect ratio:", aspect)
+
+
+    print("Pixel scales from header (arcsec):", cdelt1, cdelt2)
+    print("Aspect ratio:", aspect)
 
     # === Visualize original vs resampled ===
     print("\n=== Displaying First Slice of Cube ===")
     plt.figure(figsize=(12, 5))
 
+    # --- Original cube ---
+    pixscale_orig = cube.wcs.get_step(unit='arcsec')  # (dy, dx)
+    ny, nx = cube.shape[1:]
+    extent_orig = [0, nx * pixscale_orig[1], 0, ny * pixscale_orig[0]]
+
     plt.subplot(1, 2, 1)
     plt.title(f"Original Cube ({source_telescope.name})")
-    plt.imshow(cube.data[0], origin='lower', cmap='viridis')
+    plt.imshow(cube.data[0], origin="lower", cmap="viridis",
+            extent=extent_orig, aspect='equal')
     plt.colorbar(label='Flux')
-    plt.xlabel("X pixel")
-    plt.ylabel("Y pixel")
+    plt.xlabel("X [arcsec]")
+    plt.ylabel("Y [arcsec]")
+
+    # --- Resampled cube ---
+    pixscale_new = cropped_resampled_cube.wcs.get_step(unit='arcsec')  # (dy, dx)
+    ny2, nx2 = cropped_resampled_cube.shape[1:]
+    extent_new = [0, nx2 * pixscale_new[1], 0, ny2 * pixscale_new[0]]
 
     plt.subplot(1, 2, 2)
-    plt.title(f"Simulated at z={z2} ({target_telescope.name})")
-    plt.imshow(cropped_resampled_cube.data[0], origin='lower', cmap='viridis')
+    plt.title(f"Simulated at z={z_sim} ({target_telescope.name})")
+    plt.imshow(cropped_resampled_cube.data[0], origin="lower", cmap="viridis",
+            extent=extent_new, aspect=aspect)
     plt.colorbar(label='Flux')
-    plt.xlabel("X pixel")
-    plt.ylabel("Y pixel")
+    plt.xlabel("X [arcsec]")
+    plt.ylabel("Y [arcsec]")
 
     plt.tight_layout()
     plt.show()

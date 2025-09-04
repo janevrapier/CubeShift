@@ -5,6 +5,46 @@ from astropy.wcs import WCS as AstropyWCS
 from mpdaf.obj import Cube
 
 
+def crop_cube_to_size(cube, nx_target, ny_target):
+    """
+    Crop a 3D cube (nz, ny, nx) to the target spatial size, centered.
+    Only crops spatial axes (y, x), leaves spectral axis unchanged.
+
+    Parameters
+    ----------
+    cube : np.ndarray
+        Input cube with shape (nz, ny, nx).
+    nx_target : int
+        Desired number of pixels in x (RA).
+    ny_target : int
+        Desired number of pixels in y (Dec).
+
+    Returns
+    -------
+    cube_cropped : np.ndarray
+        Cropped cube with shape (nz, ny_target, nx_target).
+    """
+    nz, ny, nx = cube.shape
+
+    # --- Compute cropping start indices ---
+    if nx_target > nx or ny_target > ny:
+        raise ValueError(f"Target size ({ny_target}, {nx_target}) "
+                         f"is larger than cube ({ny}, {nx}). Cropping cannot enlarge.")
+
+    # Center offsets
+    x0 = (nx - nx_target) // 2
+    y0 = (ny - ny_target) // 2
+
+    # Apply crop
+    cube_cropped = cube[:, y0:y0+ny_target, x0:x0+nx_target]
+
+    # Debug
+    print(f"[DEBUG] Cropped cube from {ny}×{nx} → {ny_target}×{nx_target}, "
+          f"offsets: y0={y0}, x0={x0}")
+
+    return cube_cropped
+
+
 def auto_crop_cube(cube, sigma_thresh=2, threshold_nan=0.1, buffer=4, min_crop_size=30, debug=False):
     """
     Automatically crop an MPDAF cube to the smallest bounding box containing significant flux.

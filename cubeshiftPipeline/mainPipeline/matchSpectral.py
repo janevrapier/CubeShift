@@ -10,7 +10,6 @@ import numpy.ma as ma
 from mpdaf.obj import Cube
 import matplotlib.pyplot as plt
 from astropy import units as u
-import numpy as np
 from mpdaf.obj import Cube, WaveCoord
 import copy
 from zWavelengths import redshift_wavelength_axis

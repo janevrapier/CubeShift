@@ -1,14 +1,8 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from astropy.io import fits
-
-from astropy.io import fits
 from astropy.wcs import WCS
-import numpy as np
 
-from astropy.io import fits
-from astropy.wcs import WCS
-import numpy as np
 
 def read_in_data_fits(filename):
     """
@@ -100,6 +94,24 @@ def flux_distribution(flux_map):
     flat = flux_map.flatten()
     return flat[np.isfinite(flat) & (flat > 0)]
 
+import numpy as np
+
+def normalized_pdf(cube, bins=100):
+    """
+    Returns a PDF normalized to the range [0, 1] along the axis.
+    """
+    # Flatten the cube to 1D for histogram
+    data_flat = cube.flatten()
+
+    # Compute histogram
+    pdf, bin_edges = np.histogram(data_flat, bins=bins, density=True)
+
+    # Normalize bins to 0–1 or any fixed axis scale (e.g., 0–100)
+    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+    bin_centers_norm = (bin_centers - bin_centers.min()) / (bin_centers.max() - bin_centers.min())
+    bin_centers_norm *= 100  # optional: scale to 0–100
+
+    return bin_centers_norm, pdf
 
 def plot_flux_histogram(flux1, flux2, label1="Original z", label2="Simulated z"):
     """

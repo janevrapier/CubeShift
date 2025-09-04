@@ -40,6 +40,31 @@ from mpdaf.obj import Cube
 import matplotlib.pyplot as plt
 from binData import bin_cube
 from astropy.convolution import convolve, Gaussian2DKernel
+from astropy.cosmology import Planck18 as cosmo
+import numpy as np
+
+def rescale_flux(data, z_i, z_o):
+    """
+    Rescale flux values in a cube from redshift z_i to z_o.
+
+    Parameters
+    ----------
+    data : numpy.ndarray
+        Flux data array (e.g., cube.data).
+    z_i : float
+        Original redshift of the source.
+    z_o : float
+        Target redshift to simulate.
+
+    Returns
+    -------
+    new_data : numpy.ndarray
+        Flux-rescaled data array.
+    """
+    Dl_i = cosmo.luminosity_distance(z_i).to("cm").value
+    Dl_o = cosmo.luminosity_distance(z_o).to("cm").value
+    scale = (Dl_i / Dl_o)**2 * ((1.0 + z_i) / (1.0 + z_o))
+    return data * scale
 
 
 def scale_luminosity_for_redshift(cube, redshift_old, redshift_new, method="angular"):

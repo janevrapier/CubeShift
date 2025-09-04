@@ -18,11 +18,17 @@ from astropy.wcs import WCS
 import numpy as np
 from ioTools import read_in_data
 
-def redshift_wavelength_axis(filename, z_obs, z_sim):
+from mpdaf.obj import Cube, WCS as MPDAF_WCS, WaveCoord
+import numpy as np
+import astropy.units as u
+from astropy.io import fits
+
+def redshift_wavelength_axis(filename, z_obs, z_sim,
+                             pixscale_arcsec=None,         # float or (x,y); used only if header lacks spatial WCS
+                             keep_ra_negative=True):       # conventional RA CDELT1 < 0
     """
-    Redshift the wavelength axis of a cube from z_obs to z_sim,
-    returning a new cube with unchanged data but redshifted wavelengths.
-    Handles rectangular pixels correctly.
+    Redshift the wavelength axis of a cube from z_obs to z_sim and return a new MPDAF Cube.
+    Spatial WCS is preserved from the input when available; otherwise you must pass pixscale_arcsec.
 
     Parameters
     ----------
@@ -32,61 +38,97 @@ def redshift_wavelength_axis(filename, z_obs, z_sim):
         Original redshift of the source.
     z_sim : float
         New redshift to shift the cube to.
+    pixscale_arcsec : float or (float,float), optional
+        Spatial pixel scale (arcsec/pix). Used ONLY if the input header lacks spatial WCS.
+        If a single float, it is applied to both axes.
+    keep_ra_negative : bool
+        If True, enforce negative CDELT1 for RA (standard FITS convention).
 
     Returns
     -------
     redshifted_cube : mpdaf.obj.Cube
-        Cube with same data, mask, var, but redshifted wavelengths.
     lam_new : np.ndarray
-        New wavelength array.
     """
 
-    # --- load data & wavelength axis from FITS ---
+    # --- Load data and header via your helper ---
     lam_old, data, *rest = read_in_data(filename)
 
     header = None
     var = None
-
     if len(rest) == 2:
         var, header = rest
     elif len(rest) == 1:
         header = rest[0]
-    # if len(rest) == 0 → leave header=None, var=None
+    else:
+        header = fits.Header()
 
+    # --- Redshift wavelength axis (units preserved relative to lam_old) ---
+    lam_new = lam_old * (1.0 + z_sim) / (1.0 + z_obs)
 
-    # --- redshift wavelength axis ---
-    lam_new = lam_old * (1 + z_sim) / (1 + z_obs)
+    # Determine wave units from header if present, else default to Angstrom
+    wave_unit = (header.get('CUNIT3') or header.get('WCSDIM3') or 'Angstrom')
+    # MPDAF WaveCoord wants a unit string like 'Angstrom', 'nm', 'um'
+    # We assume lam_old already in `wave_unit`
     wave = WaveCoord(
         crval=lam_new[0],
-        cdelt=lam_new[1] - lam_new[0],
+        cdelt=np.median(np.diff(lam_new)),
         crpix=1,
-        cunit='Angstrom',
+        cunit=wave_unit,
         ctype='WAVE'
     )
 
-    # --- build Cube ---
-    redshifted_cube = Cube(data=data, var=var, header=header, wave=wave)
+    # --- Build spatial WCS ---
+    # If header has a valid spatial WCS, use it as-is (keeps CD/PC matrix, rotation, etc.)
+    has_spatial = (
+        ('CDELT1' in header or 'CD1_1' in header or 'PC1_1' in header) and
+        ('CDELT2' in header or 'CD2_2' in header or 'PC2_2' in header)
+    )
 
+    if has_spatial:
+        # Let MPDAF parse the spatial part from the header
+        wcs_spatial = MPDAF_WCS(header)
+    else:
+        # Need user-provided pixel scale
+        if pixscale_arcsec is None:
+            raise ValueError(
+                "Input header has no spatial WCS (no CDELT/CD/PC keywords). "
+                "Provide pixscale_arcsec (float or (x,y)) to build a WCS."
+            )
 
-    # --- update header explicitly ---
+        if isinstance(pixscale_arcsec, (tuple, list, np.ndarray)):
+            px_x_arcsec, px_y_arcsec = float(pixscale_arcsec[0]), float(pixscale_arcsec[1])
+        else:
+            px_x_arcsec = px_y_arcsec = float(pixscale_arcsec)
+
+        # FITS convention: RA axis is axis 1 (x), DEC is axis 2 (y)
+        cdelt1_deg = -(px_x_arcsec / 3600.0) if keep_ra_negative else (px_x_arcsec / 3600.0)
+        cdelt2_deg =  (px_y_arcsec / 3600.0)
+
+        # Reasonable defaults for missing world values
+        crval1 = header.get('CRVAL1', 0.0)
+        crval2 = header.get('CRVAL2', 0.0)
+        crpix1 = header.get('CRPIX1', 1.0)
+        crpix2 = header.get('CRPIX2', 1.0)
+        ctype1 = header.get('CTYPE1', 'RA---TAN')
+        ctype2 = header.get('CTYPE2', 'DEC--TAN')
+
+        wcs_spatial = MPDAF_WCS(
+            crval=(crval1, crval2),
+            cdelt=(cdelt1_deg, cdelt2_deg),
+            crpix=(crpix1, crpix2),
+            cunit=('deg', 'deg'),
+            ctype=(ctype1, ctype2)
+        )
+
+    # --- Build the new MPDAF cube with explicit WCS and Wave ---
+    redshifted_cube = Cube(data=data, var=var, wcs=wcs_spatial, wave=wave)
+
+    # --- Update a few informative header keywords (do NOT overwrite WCS again) ---
     hdr = redshifted_cube.data_header
-    hdr['CRVAL3'] = lam_new[0]
-    hdr['CDELT3'] = lam_new[1] - lam_new[0]
-    hdr['CTYPE3'] = 'VWAV'
-    hdr['CUNIT3'] = 'Angstrom'
-    hdr['REDSHIFT'] = z_sim
-
-    # --- ensure spatial units exist ---
-    if 'CUNIT1' not in hdr or not hdr['CUNIT1']:
-        hdr['CUNIT1'] = 'arcsec'
-    if 'CUNIT2' not in hdr or not hdr['CUNIT2']:
-        hdr['CUNIT2'] = 'arcsec'
-
-    # --- rebuild WCS from header ---
-
-    redshifted_cube.wcs = mpdaf_WCS(hdr)
+    hdr['REDSHIFT'] = (z_sim, 'Simulated redshift applied to wavelength axis')
 
     return redshifted_cube, lam_new
+
 
 
 def check_redshifted_cube(redshifted_cube):
@@ -136,28 +178,28 @@ if __name__ == "__main__":
 
     output_path = f"/Users/janev/Library/CloudStorage/OneDrive-Queen'sUniversity/MNU 2025/Output_cubes/{galaxy_name}/{galaxy_name}_redshifted_cube_{z_sim}.fits"
     
-    lam_old, data, _ = read_in_data_fits(file_path)
+    lam_old, data, _ = read_in_data(file_path)
 
 
     # Run redshift function
     redshifted_cube, lam_new = redshift_wavelength_axis(file_path, z_obs, z_sim)
 
-    # Print wavelength range before/after
-    print(f"Original λ range: {lam_old[0]:.2f} – {lam_old[-1]:.2f}")
-    print(f"Redshifted λ range: {lam_new[0]:.2f} – {lam_new[-1]:.2f}")
-    check_redshifted_cube(redshifted_cube)
-    print(f"--- Redshifted Cube Check ---")
-    print(f"Cube shape (λ, y, x): {redshifted_cube.shape}")
-    print("Min flux:", np.nanmin(data))
-    print("Max flux:", np.nanmax(data))
+    # # Print wavelength range before/after
+    # print(f"Original λ range: {lam_old[0]:.2f} – {lam_old[-1]:.2f}")
+    # print(f"Redshifted λ range: {lam_new[0]:.2f} – {lam_new[-1]:.2f}")
+    # check_redshifted_cube(redshifted_cube)
+    # print(f"--- Redshifted Cube Check ---")
+    # print(f"Cube shape (λ, y, x): {redshifted_cube.shape}")
+    # print("Min flux:", np.nanmin(data))
+    # print("Max flux:", np.nanmax(data))
 
-    hdr = redshifted_cube.data_header
-    print(f"X: CRVAL={hdr.get('CRVAL1')}, CRPIX={hdr.get('CRPIX1')}, "
-        f"CDELT={hdr.get('CDELT1')}, CUNIT={hdr.get('CUNIT1')}")
-    print(f"Y: CRVAL={hdr.get('CRVAL2')}, CRPIX={hdr.get('CRPIX2')}, "
-        f"CDELT={hdr.get('CDELT2')}, CUNIT={hdr.get('CUNIT2')}")
-    print(f"Λ: CRVAL={hdr.get('CRVAL3')}, CRPIX={hdr.get('CRPIX3')}, "
-        f"CDELT={hdr.get('CDELT3')}, CUNIT={hdr.get('CUNIT3')}")
+    # hdr = redshifted_cube.data_header
+    # print(f"X: CRVAL={hdr.get('CRVAL1')}, CRPIX={hdr.get('CRPIX1')}, "
+    #     f"CDELT={hdr.get('CDELT1')}, CUNIT={hdr.get('CUNIT1')}")
+    # print(f"Y: CRVAL={hdr.get('CRVAL2')}, CRPIX={hdr.get('CRPIX2')}, "
+    #     f"CDELT={hdr.get('CDELT2')}, CUNIT={hdr.get('CUNIT2')}")
+    # print(f"Λ: CRVAL={hdr.get('CRVAL3')}, CRPIX={hdr.get('CRPIX3')}, "
+    #     f"CDELT={hdr.get('CDELT3')}, CUNIT={hdr.get('CUNIT3')}")
 
 
 
