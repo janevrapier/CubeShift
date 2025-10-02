@@ -50,7 +50,7 @@ def redshift_wavelength_axis(filename, z_obs, z_sim,
     lam_new : np.ndarray
     """
 
-    # --- Load data and header via your helper ---
+    # --- Load data and header via helper ---
     lam_old, data, *rest = read_in_data(filename)
 
     header = None
