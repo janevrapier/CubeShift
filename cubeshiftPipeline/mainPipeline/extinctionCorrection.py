@@ -183,8 +183,6 @@ def preRedshiftExtCor(cube_path):
     print(f"Go to https://ned.ipac.caltech.edu/byname")
     print("Step 1: enter the galaxy name")
     print("Step 2: copy/paste the RA and Dec coordinates into the extinction calculator: https://ned.ipac.caltech.edu/extinction_calculator")
-    ra_deg = 346.235578   
-    dec_deg = 19.552296
     print(f"Cube path is: {cube_path}")
     cube = Cube(cube_path)
     print(f"Cube path after making cube is: {cube_path}")

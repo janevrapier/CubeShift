@@ -21,9 +21,10 @@ from mpdaf.obj import WCS as MPDAF_WCS
 from scipy.optimize import curve_fit
 from astropy.io import fits
 from astropy.modeling.models import Gaussian2D
-from mpdaf.obj import Cube, WCS
+from mpdaf.obj import Cube
 from astropy.io.fits import Header
 from main import simulate_observation
+
 
 # 2d array (num py to stack) to represent the cube in the x, y direction 
 # every spaxel in the cube is exactly the same, it is the same individual gaussian repeated in every spaxel
@@ -95,19 +96,6 @@ def make_emission_line_cube(nx=100, ny=100, nw=50,
     plt.show()
 
     return cube
-
-import numpy as np
-import matplotlib.pyplot as plt
-from astropy.io.fits import Header
-from mpdaf.obj import Cube, WCS as MPDAF_WCS, WaveCoord
-from astropy.modeling.models import Sersic2D
-
-import numpy as np
-import matplotlib.pyplot as plt
-from astropy.io import fits
-from astropy.io.fits import Header
-from mpdaf.obj import Cube, WaveCoord, WCS as MPDAF_WCS
-from astropy.modeling.models import Sersic2D
 
 def make_gauss_cube(nx=100, ny=100, nw=50,
                             lam_min=5000.0, lam_max=5100.0,

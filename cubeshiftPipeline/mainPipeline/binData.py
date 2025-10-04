@@ -315,9 +315,6 @@ def bin_cube(x_factor, y_factor, data_cube, margin='center', method='sum', inpla
 
 
 
-
-
-
 def resample_cube_to_telescope_and_redshift(
     cube,
     target_telescope,
@@ -566,11 +563,6 @@ def pad_cube_with_background(cube, target_nx, target_ny, name=None):
     print(f"[DEBUG] Padded cube shape: {cube_padded.shape}")
     print(f"[DEBUG] Padded cube wave: {cube_padded.wave}")
     return cube_padded
-
-
-
-
-
 
 
 

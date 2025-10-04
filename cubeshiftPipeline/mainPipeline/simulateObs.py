@@ -1,10 +1,6 @@
 """
 simulateObs.py
 
-This module simulates how a galaxy observed at low redshift with one telescope 
-(e.g. Keck/KCWI) would appear if observed at higher redshift with another 
-(e.g. JWST NIRCam).
-
 The simulation includes:
     1. Binning the data cube to a lower spatial resolution (to match the target instrument's pixel scale).
     2. Adjusting the brightness in each pixel to account for redshift effects:

@@ -2,15 +2,13 @@ import copy
 import numpy as np
 import matplotlib.pyplot as plt
 from astropy.io import fits
-from astropy.wcs import WCS
 from astropy import units as u
 from astropy.cosmology import Planck18 as cosmo
 from reproject import reproject_interp
 from mpdaf.obj import Cube, coords
 from astropy.wcs import WCS as AstropyWCS
-
-from astropy.wcs import WCS
 from astropy.io import fits
+
 def get_spectral_wcs_keywords_from_wave(cube):
     wave_coords = cube.wave.coord()  # 1D numpy array of wavelengths
     nz = len(wave_coords)
